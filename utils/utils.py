@@ -1,7 +1,7 @@
-text = """
+Text = """
 {
 ¿Qué es un proyecto de interconexión eléctrica (o de transmisión de energía)?:
-Es la construcción de un conjunto de estructuras – torres, líneas y subestaciones- donde se recibe, transforma y transporta la energía eléctrica a alto voltaje que llega de las generadoras ubicadas en diferentes zonas del país y que debe pasar por subestaciones “elevadoras”o “reductoras” que establecen los niveles de tensión adecuados para la transmisión o transporte y la distribución, hasta llegar finalmente a los hogares e industrias, tras recorrer la diversa geografía del país. 
+Es la construcción de un conjunto de estructuras torres, líneas y subestaciones- donde se recibe, transforma y transporta la energía eléctrica a alto voltaje que llega de las generadoras ubicadas en diferentes zonas del país y que debe pasar por subestaciones “elevadoras”o “reductoras” que establecen los niveles de tensión adecuados para la transmisión o transporte y la distribución, hasta llegar finalmente a los hogares e industrias, tras recorrer la diversa geografía del país. 
 ¿Qué es una línea de transmisión?:
 Las líneas de transmisión que hacen parte de un proyecto de interconexión, son un conjunto de estructuras conformadas por torres, cables y aisladores, que permiten transportar energía de un punto geográfico a otro. Son la manera más económica de mover enormes cantidades de energía y utilizar altos voltajes mediante cables o líneas conductoras de gran calibre, sostenidas por torres o estructuras especiales aisladas de los cables. 
 ¿Dónde se genera la energía que circulará por las líneas de transmisión?:

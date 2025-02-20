@@ -3,3 +3,16 @@
 # Manually managing azure-functions-worker may cause unexpected issues
 
 azure-functions
+azure-core
+azure-storage-blob
+faiss-cpu
+tiktoken
+langchain==0.0.295
+pytz
+numpy
+openai==0.28.0
+openapi-schema-pydantic==1.2.4
+pyodbc
+pymssql
+langchain-experimental==0.0.22
+packaging 
