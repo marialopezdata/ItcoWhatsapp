@@ -4,12 +4,35 @@ from functools import lru_cache
 from azure.identity import DefaultAzureCredential
 from azure.cosmos import CosmosClient
 from azure.storage.blob import BlobServiceClient
+from azure.keyvault.secrets import SecretClient
+
+
+# URL del Key Vault
+key_vault_url = os.environ["key_vault_url"]
 
 
 @lru_cache
 def get_credential():
     """Obtiene una credencial por defecto de Azure (con caché)."""
     return DefaultAzureCredential()
+
+
+@lru_cache
+def get_secrets(secret_name):
+    try:
+        # Autenticación con la identidad administrada
+        credential = get_credential()
+
+        # Cliente para consultar secretos
+        client = SecretClient(vault_url=key_vault_url, credential=credential)
+
+        # Obtener un secreto
+        retrieved_secret = client.get_secret(secret_name)
+        
+        return retrieved_secret.value
+    except Exception as e:
+        logging.error(f"ERROR - getting secret: {e}")
+        raise
 
 
 @lru_cache

@@ -1,11 +1,9 @@
 import logging
 import azure.functions as func
 import json
-import os
 from . import functionHttp
+from utils.azure_clients import get_secrets
 
-# Token de verificación de Facebook Business Webhook
-VERIFY_TOKEN = os.environ.get("webhook_token", "")
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Python HTTP trigger function processed a request.")
@@ -65,10 +63,11 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
 def handle_verification(req: func.HttpRequest) -> func.HttpResponse:
     """ Maneja la verificación del Webhook de WhatsApp Business API """
+    secret_verify_token = get_secrets("openai-api-key") 
     verify_token_wa = req.params.get("hub.verify_token")
     challenge = req.params.get("hub.challenge", "")
 
-    if VERIFY_TOKEN != verify_token_wa:
+    if secret_verify_token != verify_token_wa:
         return func.HttpResponse(json.dumps({"error": "Verificación fallida"}), status_code=403)
 
     return func.HttpResponse(challenge, status_code=200)

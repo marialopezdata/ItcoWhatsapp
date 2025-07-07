@@ -1,14 +1,10 @@
 import os
 import logging
 import azure.functions as func
-
 from office365.sharepoint.files.file import File
 from office365.sharepoint.client_context import ClientContext
 from office365.runtime.auth.client_credential import ClientCredential
-
-
-from azure.identity import DefaultAzureCredential
-from azure.storage.blob import BlobServiceClient
+from utils.azure_clients import get_blob_container, get_secrets
 
 def process_sharepoint_folder(ctx, relative_url, container_client, file_extensions, blob_prefix):
     """
@@ -24,6 +20,26 @@ def process_sharepoint_folder(ctx, relative_url, container_client, file_extensio
     Returns:
     - List[str]: A list of filenames that were successfully uploaded to Blob Storage.
     """
+    
+    # Delete existing blobs under the prefix
+    logging.info(f"Deleting existing blobs in Blob Storage under prefix '{blob_prefix}'")
+    folder_prefix = blob_prefix + "/"
+    blobs_to_delete = container_client.list_blobs(name_starts_with = folder_prefix)
+    for blob in blobs_to_delete:
+        relative_path = blob.name[len(folder_prefix):]
+
+        # Skip if it's inside a subfolder
+        if "/" in relative_path:
+            continue
+        
+        try:
+            container_client.delete_blob(blob.name)
+            logging.info(f"Delete blob: {blob.name}")
+        except Exception as e:
+            logging.error(f"Error Deleting '{blob.name}': {str(e)}")
+        
+    # Load files from SharePoint
+    # Access the folder and retrieve the file list    
     uploaded_files = []
 
     # Access the folder and retrieve the file list
@@ -63,20 +79,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         sharepoint_saludo_relativeurl = os.environ["sharepoint_saludo_relativeurl"]
         sharepoint_difusion_relativeurl = os.environ["sharepoint_difusion_relativeurl"]
         sharepoint_images_relativeurl = os.environ["sharepoint_images_relativeurl"]
-        sharepoint_clientid = os.environ["sharepoint_clientid"]
-        sharepoint_clientsecret = os.environ["sharepoint_clientsecret"]
-        storage_account_name = os.environ["storage_account_name"]
-        storage_container_basecono = os.environ["storage_container_basecono"]
+        sharepoint_clientid = get_secrets("sharepoint-clientid")
+        sharepoint_clientsecret = get_secrets("sharepoint-clientsecret")        
         
         # Connect to SharePoint using App Registration credentials
         credentials = ClientCredential(sharepoint_clientid, sharepoint_clientsecret)
-        ctx = ClientContext(sharepoint_site_url).with_credentials(credentials)
-
-        # Connect to Azure Blob Storage using managed identity
-        account_url = f"https://{storage_account_name}.blob.core.windows.net"
-        credential = DefaultAzureCredential()
-        blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
-        container_client = blob_service_client.get_container_client(storage_container_basecono)
+        ctx = ClientContext(sharepoint_site_url).with_credentials(credentials)        
+        
+        # Obtener una referencia al contenedor
+        container_client = get_blob_container("storage_container_basecono")
         container_client.get_container_properties()
 
         # Process folders

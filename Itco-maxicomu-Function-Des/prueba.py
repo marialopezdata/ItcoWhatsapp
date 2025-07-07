@@ -1,23 +1,23 @@
-from azure.identity import DefaultAzureCredential
-from azure.keyvault.secrets import SecretClient
-import logging
+# from azure.identity import DefaultAzureCredential
+# from azure.keyvault.secrets import SecretClient
+# import logging
 
-# URL del Key Vault
-key_vault_url = "https://itco-kv-pru-maxicomu-001.vault.azure.net/"
+# # URL del Key Vault
+# key_vault_url = "https://itco-kv-pru-maxicomu-001.vault.azure.net/"
 
-# Autenticación con la identidad administrada
-credential = DefaultAzureCredential()
+# # Autenticación con la identidad administrada
+# credential = DefaultAzureCredential()
 
-print(f"credential:{credential}")
+# print(f"credential:{credential}")
 
-# Cliente para consultar secretos
-client = SecretClient(vault_url=key_vault_url, credential=credential)
+# # Cliente para consultar secretos
+# client = SecretClient(vault_url=key_vault_url, credential=credential)
 
-# Obtener un secreto
-secret_name = "webhook-token"
-retrieved_secret = client.get_secret(secret_name)
+# # Obtener un secreto
+# secret_name = "webhook-token"
+# retrieved_secret = client.get_secret(secret_name)
 
-print(f"Valor del secreto: {retrieved_secret.value}")
+# print(f"Valor del secreto: {retrieved_secret.value}")
 
 
 #
