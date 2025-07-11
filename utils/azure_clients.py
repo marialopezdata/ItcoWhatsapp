@@ -1,10 +1,10 @@
 import os
 import logging
 from functools import lru_cache
-from azure.identity import DefaultAzureCredential
 from azure.cosmos import CosmosClient
-from azure.storage.blob import BlobServiceClient
 from azure.keyvault.secrets import SecretClient
+from azure.storage.blob import BlobServiceClient
+from azure.identity import DefaultAzureCredential
 
 
 # URL del Key Vault

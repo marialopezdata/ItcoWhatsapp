@@ -48,6 +48,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         # **Responde 200 antes de procesar la lógica pesada**
         response_data = {"status": "processing"}
         func.HttpResponse(json.dumps(response_data), status_code=200)
+        
         # Obtener respuesta de OpenAI y enviar el mensaje
         response_text = functionHttp.openai_request(value)
         functionHttp.send_whatsapp_message(body, response_text)

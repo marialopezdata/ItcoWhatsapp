@@ -2,6 +2,7 @@ import uuid
 import os
 import re
 import io
+import re
 import pickle
 import logging
 import requests
@@ -14,8 +15,10 @@ from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain.chat_models import AzureChatOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
 from utils.azure_clients import get_cosmos_container, get_blob_container, get_secrets
+from utils.prompt import built_prompt
 
 
+# Variables de entorno
 # Definir tiempo máximo de conversación activa (24 horas)
 time_hours = int(os.environ.get("time_hours", 24))
 secret_openai_api_key = get_secrets("openai-api-key")
@@ -34,25 +37,27 @@ def download_greeting():
         blob_data = blob_client.download_blob()
         file_content = blob_data.readall().decode("utf-8")
         
-        # Expresiones regulares para extraer el saludo y la despedida
-        greeting_match = re.search(r"Saludo:\s*(.*?)(?=\s*Despedida:|$)", file_content, re.DOTALL)
-        closing_match = re.search(r"Despedida:\s*(.*)", file_content, re.DOTALL)
+        try:
+            pattern = r"(?m)^(\w+):\s*([\s\S]+?)(?=\n\w+:|\Z)"
+            matches = re.findall(pattern, file_content)
+            sections = {key: value.strip() for key, value in matches}        
+            logging.info("Secciones extraídas correctamente.")
+        except Exception as regex_err:
+            logging.error(f"Error en regex: {str(regex_err)}")
+            matches = []
         
-        # Saludo
-        greeting = (
-            greeting_match[1].strip()
-            if greeting_match
-            else "Saludo no encontrado"
-        )
+        greeting = sections.get("Saludo", "No se encontró Saludo")
+        closing = sections.get("Cierre", "No se encontró Cierre") 
+        feedback = sections.get("Feedback", "No se encontró Feedback") 
+        feedback_comment = sections.get("FeedbackComment", "No se encontró comentario de Feedback") 
+        thanks = sections.get("Gracias", "No se encontró Gracias")
+        session_end = sections.get("Despedida", "No se encontró Despedida")
+        infocorporativalabel = sections.get("InfoCorporativaLabel", "No se encontró etiqueta de información corporativa")
+        infonocorporativalabel = sections.get("InfoNoCorporativaLabel", "No se encontró etiqueta de información no corporativa")
+        infonocorporativa = sections.get("InfoNoCorporativa", "No se encontró Mensaje de información no corporativa")
+        infoexterna = sections.get("InfoExterna", "No se encontró Mensaje de información externa")        
         
-        # Despedida
-        closing = (
-            closing_match[1].strip()
-            if closing_match
-            else "Despedida no encontrada"
-        )
-        
-        return greeting, closing
+        return greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna
     
     except Exception as e:
         logging.error(f"ERROR - getting greetings: {e}")
@@ -61,7 +66,7 @@ def download_greeting():
 
 def download_vectorialdb():
     """Descarga el contexto de la BD vectorial."""
-    try:     
+    try:
         
         # Cliente de Blob      
         blob_container = get_blob_container("storage_container_vectordb")
@@ -123,7 +128,7 @@ def get_conversation(container, userId):
 
 def save_conversation(container, new_conversation_data):
     """Guarda la conversación en la Base de Datos."""
-    try:              
+    try:       
         container.upsert_item(new_conversation_data)        
     except Exception as e:
         logging.error(f'ERROR - getting conversation in database: {e}')
@@ -132,49 +137,70 @@ def save_conversation(container, new_conversation_data):
 
 def validate_policy(conversation_history):
     """Valida si la política de tratamiento de datos personales fue enviada y aceptada o negada."""
-    show_policy = False
-    accepted_policy = False
+    try:
+        show_policy = False
+        accepted_policy = False
+        
+        for msg in conversation_history:
+            if msg["role"] == "assistant" and msg.get("typeMessage") == "politica":
+                show_policy = True  # Se mostró la política, ahora esperamos respuesta    
+            elif show_policy and msg["role"] == "user":
+                if msg["content"].strip() in ["accept"]:
+                    accepted_policy = True
+                elif msg["content"].strip() in ["reject"]:
+                    accepted_policy = False  # Si en algún momento la negó, no aceptamos
+                break  # Salimos del bucle después de la respuesta del usuario
+        return not accepted_policy  # Devuelve 'False' si la política fue aceptada
     
-    for msg in conversation_history:
-        if msg["role"] == "assistant" and msg.get("type_message") == "politica":
-            show_policy = True  # Se mostró la política, ahora esperamos respuesta            
-        elif show_policy and msg["role"] == "user":
-            if msg["content"].strip().upper() in ["SI", "SÍ"]:
-                accepted_policy = True
-            elif msg["content"].strip().upper() in ["NO"]:
-                accepted_policy = False  # Si en algún momento la negó, no aceptamos
-            break  # Salimos del bucle después de la respuesta del usuario
-    return not accepted_policy  # Devuelve 'False' si la política fue aceptada
+    except Exception as e:
+        logging.error(f"ERROR - validating policy: {e}")
+        raise
 
 
 def create_embeddings_with_openai(text_content):
-    embeddings = AzureOpenAIEmbeddings(
-            azure_deployment="text-embedding-ada")
-    return embeddings.embed_query(text_content)
+    """Instancia embeddings desde AzureOpenaAIEmbeddings."""
+    try:
+        embeddings = AzureOpenAIEmbeddings(
+                azure_deployment="text-embedding-ada")
+        return embeddings.embed_query(text_content)
+    except Exception as e:
+        logging.error(f"ERROR - creating embeddings: {e}")
+        raise
 
 
-def extract_categories(docs):
-    categories = []
-    for doc in docs:
-        match = re.search(r'CATEGORIA\s*:\s*(.*?)\.', doc.page_content, re.IGNORECASE)
-        if match:
-            categories.append(match.group(1).strip())
+def extract_categories(docs, na):
+    """Extrae las categorías de los documentos."""
+    try:
+        categories = []
+        for doc in docs:
+            match = re.search(r'CATEGORIA\s*:\s*(.*?)\.', doc.page_content, re.IGNORECASE)
+            if match:
+                categories.append(match.group(1).strip())
+            else:
+                categories.append("Categoría no encontrada")
+                
+        categories = drop_duplicates(categories, na)
+        return categories
+    except Exception as e:
+        logging.error(f"ERROR - extracting categories: {e}")
+        raise
+
+
+def drop_duplicates (lista: list, na):
+    """Borra duplicados en las listas de Categorías y Fuentes."""
+    try:
+        if lista:
+                lista = list(set(lista))  # eliminar duplicados
         else:
-            categories.append("Categoría no encontrada")
-            
-    categories = drop_duplicates(categories)
-    return categories
-
-
-def drop_duplicates (lista: list):
-    if lista:
-            lista = list(set(lista))  # eliminar duplicados
-    else:
-        lista.append("Información no encontrada")
-    return lista
+            lista = [na]
+        return lista
+    except Exception as e:
+        logging.error(f"ERROR - dropping duplicates: {e}")
+        raise
 
 
 def process_webhook_pricing(value):
+    """Extrae la información facturable de la conversación desde el webhook."""
     try:
         pricing = value.get("pricing", {})
         if pricing:
@@ -189,6 +215,7 @@ def process_webhook_pricing(value):
 
 
 def whatsapp_pricing_usd():
+    """Obtiene la información del costo de la conversación para hacer el cálculo."""
     try:
         # Obtener una referencia al contenedor
         blob_container = get_blob_container("storage_container_basecono")
@@ -208,6 +235,7 @@ def whatsapp_pricing_usd():
 
 
 def calculate_pricing(user_id, pricing_category: str):
+    """Calcula el costo de la conversación."""
     try:
         price = 0
         
@@ -235,44 +263,174 @@ def calculate_pricing(user_id, pricing_category: str):
         raise
 
 
-def openai_request(value, **kwargs):
-    """Procesa el mensaje, obtiene respuesta de OpenAI y almacena la conversación en CosmosDB."""
+def build_openai_model():
+    """Construye la instancia del modelo OpenAi."""
     try:
-        
-        container = get_cosmos_container()
-        now = datetime.now(timezone.utc)
-        send_greeting, send_closing = False, False
-        session_status = "opened"
-        value_messages = value.get("messages", [{}])[0]
-        message = value_messages["text"]["body"]
-        message_id = value_messages["id"]
-        user_id = value_messages["from"]
-        user_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "Usuario")
-        categories = "No Aplica"
-        model = AzureChatOpenAI(
+        return AzureChatOpenAI(
             temperature=0.0,
             deployment_name=os.environ["AZURE_DEPLOYMENT_MODEL_NAME"],
             api_key=secret_openai_api_key,
             azure_endpoint=azure_endpoint,
             api_version=api_version
         )
+    except Exception as e:
+        logging.error(f"ERROR - building openai model: {e}")
+        raise
 
-        # Agregar contexto si contiene "servidumbre"
-        if "servidumbre" in message.lower():
+
+def preprocess_message(message, conversation_history, closing):
+    """Estadariza ciertas expresiones que se pueden encontrar en el mensaje recibido."""
+    try:
+        msg = message.strip().upper()
+        
+        close_message = has_previous_closing_response(conversation_history, closing)        
+        
+        if "SERVIDUMBRE" in msg:
             message = (
-                "Estoy haciendo una consulta legal sobre una servidumbre eléctrica, servidumbre de transmisión de energía o servidumbre de transmisión de energía y telecomunicaciones. "
-                "Por favor, responde en ese contexto. " + message
-            )
+                        "Estoy haciendo una consulta legal sobre una servidumbre eléctrica, servidumbre de transmisión de energía o servidumbre de transmisión de energía y telecomunicaciones. "
+                        "Por favor, responde en ese contexto. " + message
+                    )
+        elif msg in {"SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"} and close_message:
+            message = "SI"
+        elif msg in {"SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"}:
+            message = "accept"
+        elif msg == "NO" and close_message:
+            message = "NO"
+        elif msg == "NO":
+            message = "reject"        
+        elif msg.strip() == "👍":
+            message = "1"
+        elif msg.strip() == "👎":
+            message = "0"
+        
+        return message
+    except Exception as e:
+        logging.error(f"ERROR - processing message: {e}")
+        raise
 
-        pricing_info = process_webhook_pricing(value)
 
-        billable = pricing_info["billable"]
-        pricing_category = pricing_info["category"]
-        pricing_model = pricing_info["pricing_model"]
+def initialize_conversation(now, user_id, user_name):
+    """Inicializa una nueva conversación."""
+    try:
+        return {
+            "id": str(uuid.uuid4()),
+            "userId": user_id,
+            "userName": user_name,
+            "createdAt": now,
+            "updatedAt": datetime(1900, 1, 1),
+            "messages": [],
+            "sessionStatus": "opened"
+        }
+    except Exception as e:
+        logging.error(f"ERROR - initializing conversation: {e}")
+        raise
+
+
+def should_close_conversation(conversation, now, time_hours):
+    """Determina si debe cerrarse una conversación existente."""
+    try:
+        created_at = datetime.fromisoformat(conversation["createdAt"])
+        expired = (now - created_at) >= timedelta(hours=time_hours)
+        manually_closed = conversation["sessionStatus"] == "closed"
+        return expired or manually_closed
+    except Exception as e:
+        logging.error(f"ERROR - closing conversation: {e}")
+        raise
+
+
+def already_processed(conversation_history, message_id):
+    """Determina si el mensaje ya fue procesado."""
+    try:
+        return any(msg.get("messageId") == message_id and msg["role"] == "assistant" for msg in conversation_history)
+    except Exception as e:
+        logging.error(f"ERROR - validating existing conversation: {e}")
+        raise
+
+
+def add_message(history, role, content, message_id, now, msg_type, fuente, categories):
+    """Adiciona un mensaje al historial."""
+    try:
+        history.append({
+            "role": role,
+            "content": content,
+            "date": now.isoformat(),
+            "messageId": message_id,
+            "typeMessage": msg_type,
+            "fuente": fuente,
+            "categories": categories
+        })
+    except Exception as e:
+        logging.error(f"ERROR - adding message: {e}")
+        raise
+
+
+def build_prompt_and_messages(history, message, na, prompt):
+    """Construye el mensaje a partir del prompt."""
+    try:
+        vector_store = download_vectorialdb()
+        docs = vector_store.similarity_search(message, k=3)
+        contexto = "\n".join([doc.page_content for doc in docs])    
+        system_message = SystemMessage(content=f"{prompt}\n\nContexto relevante:\n{contexto}")
+        messages = [system_message]
         
-        price = calculate_pricing(user_id, pricing_category)
+        for msg in history:
+            if msg["role"] == "user":
+                messages.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant":
+                messages.append(AIMessage(content=msg["content"]))
         
+        messages.append(HumanMessage(content=message))
         
+        categories = extract_categories(docs, na)
+        
+        return messages, categories
+    except Exception as e:
+        logging.error(f"ERROR - building prompt: {e}")
+        raise
+
+
+def has_previous_closing_response(history, closing):
+    """Devuelve True si ya existe un mensaje de cierre previo del asistente."""
+    try:
+        for msg in history:
+            if msg["role"] == "assistant" and closing in msg.get("content", ""):
+                return True
+        return False
+    except Exception as e:
+        logging.error(f"ERROR - consulting previous closing: {e}")
+        raise
+
+
+def has_previous_feedback_response(history, feedback_comment):
+    """Devuelve True si el asistente ya ha solicitado el comentario del feedback."""
+    try:
+        for msg in history:
+            if msg["role"] == "assistant" and feedback_comment in msg.get("content", ""):
+                return True
+        return False
+    except Exception as e:
+        logging.error(f"ERROR - consulting previous feedback: {e}")
+        raise
+
+
+def openai_request(value):
+    """Procesa el mensaje, obtiene respuesta de OpenAI y almacena la conversación en CosmosDB."""
+    try:      
+        # Datos principales
+        value_messages = value.get("messages", [{}])[0]
+        message = value_messages["text"]["body"]
+        message_id = value_messages["id"]
+        user_id = value_messages["from"]
+        user_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "Usuario")
+        na = "No Aplica"
+        categories = na
+        fuente = na    
+        send_greeting, send_feedback, send_session_end, send_comment, send_thanks = False, False, False, False, False
+        session_status = "opened"
+        now = datetime.now(timezone.utc)
+        
+        container = get_cosmos_container()
+
         conversation = get_conversation(container, user_id)
 
         if conversation:
@@ -281,224 +439,152 @@ def openai_request(value, **kwargs):
             createdAt = datetime.fromisoformat(conversation["createdAt"])
             updatedAt = now
             
-            # Validar si ya se respondió este mensaje
-            if any(msg.get("messageId") == message_id and msg["role"] == "assistant" for msg in conversation_history):
-                logging.info(f"Mensaje con ID {message_id} ya fue procesado. No se generará una nueva respuesta.")
-                return None  # O una cadena vacía
-
-            if (now - createdAt) >= timedelta(hours=time_hours):
-                logging.info("Se cerrará la conversación")
-                conversation["session_status"] = "closed"
+            if already_processed(conversation_history, message_id):
+                logging.info(f"Mensaje con ID {message_id} ya fue procesado.")
+                return None
+            
+            if should_close_conversation(conversation, now, time_hours):
+                logging.info("Conversación cerrada o expirada. Se crea una nueva.")
+                conversation["sessionStatus"] = "closed"
                 save_conversation(container, conversation)
-                conversation_id = str(uuid.uuid4())
+                conversation = initialize_conversation(now, user_id, user_name)
+                conversation_id = conversation["id"]
                 createdAt = now
-                updatedAt = datetime(1900, 1, 1)
-                conversation_history = []
+                conversation_history = conversation["messages"] 
                 send_greeting = True
-            elif conversation["session_status"] == 'closed':
-                logging.info("Conversación Cerrada, se crea una nueva")
-                conversation_id = str(uuid.uuid4())
-                createdAt = now
-                updatedAt = datetime(1900, 1, 1)
-                conversation_history = []
-                send_greeting = True
-            elif validate_policy(conversation_history):  # Esta función debe revisar bien el historial
-                send_greeting = True
+            elif validate_policy(conversation_history):
                 logging.info("Política no aceptada")
+                send_greeting = True
         else:
-            conversation_id = str(uuid.uuid4())
+            logging.info("No existe ninguna. Se crea una nueva.")
+            conversation = initialize_conversation(now, user_id, user_name)
+            conversation_id = conversation["id"]
             createdAt = now
             updatedAt = datetime(1900, 1, 1)
-            conversation_history = []
+            conversation_history = conversation["messages"]
             send_greeting = True
-
-        greeting, closing = download_greeting()
-
-        # Aceptación explícita de la política
-        if message.strip().upper() in {"SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"}:
-            send_greeting, send_closing = False, False
-            conversation_history.append({
-                "role": "user",
-                "content": message,
-                "date": now.isoformat(),
-                "messageId": message_id,
-                "type_message": "politica"  # Esto es clave
-            })
-        elif message.strip().upper() == "NO":
-            send_closing, send_greeting = True, False
-            conversation_history.append({
-                "role": "user",
-                "content": message,
-                "date": now.isoformat(),
-                "messageId": message_id,
-                "type_message": "politica"  # También etiquetar el "NO"
-            })
-
-        # Almacenar mensaje original (normal)
-        conversation_history.append({
-            "role": "user",
-            "content": message,
-            "date": now.isoformat(),
-            "messageId": message_id,
-            "type_message": "normal"
-        })
-
-        if send_greeting:
-            system_message = SystemMessage(content=f"Hola {user_name}, {greeting}")
-            type_message = "politica"
-        else:
-            system_message, type_message = None, "normal"
-
-        if send_closing:
-            closing_message = SystemMessage(content=closing)
-            session_status = "closed"
-            conversation_history.append({
-                "role": "assistant",
-                "content": closing_message.content,
-                "date": now.isoformat(),
-                "messageId": message_id,
-                "type_message": "closing"
-            })
-            save_conversation(container, {
-                "id": conversation_id,
-                "userId": user_id,
-                "user_name": user_name,
-                "createdAt": createdAt.isoformat(),
-                "updatedAt": updatedAt.isoformat(),
-                "messages": conversation_history,
-                "session_status": session_status
-            })
-            return closing_message.content
-
-        vector_store = download_vectorialdb()
-        docs = vector_store.similarity_search(message, k=3)
-        contexto = "\n".join([doc.page_content for doc in docs])
-        
-        prompt_detallado = """Eres un experto en derecho administrativo y urbanismo, especializado en gestión predial e infraestructura pública conforme a las normativas colombianas. Tu función principal es responder las 
-        preguntas del usuario priorizando siempre el contenido documental proporcionado en el contexto. Si no encuentras información suficiente en los documentos, puedes complementar la respuesta con otras fuentes, 
-        pero debes indicarlo explícitamente.
-
-            INSTRUCCIONES ESTRICTAS:
-
-                1. Analiza cuidadosamente la consulta del usuario y el contexto documental.
-                
-                2. Prioriza las respuestas basadas en el contenido del contexto:
-
-                    * Si la respuesta está completa en el contexto, utiliza exclusivamente esa información y **añade la etiqueta [INFORMACIÓN CORPORATIVA] al final de la respuesta.**
-
-                    * Si la pregunta está relacionada con los temas del contexto (gestión predial, normativas colombianas, derecho administrativo o urbanismo), **pero no hay suficiente información documental**, puedes complementar con conocimientos externos. En ese caso:
-                        - Comienza la respuesta con esta frase exacta:  
-                        `"Con la información corporativa que conozco, no puedo responder completamente tu pregunta 🙁. Pero he encontrado esta información No corporativa."`
-                        - Añade **al final de la respuesta la etiqueta [INFORMACIÓN NO CORPORATIVA]**
-
-                3.  Cada afirmación basada en los documentos debe citar su fuente al final de la respuesta, indicando:
-                        - `Fuentes consultadas: [NOMBRE DEL DOCUMENTO]`
-                        - Añade después la etiqueta correspondiente: `[INFORMACIÓN CORPORATIVA]` o `[INFORMACIÓN NO CORPORATIVA]` según sea el caso.
-                
-                4. Si hay contradicciones entre documentos, menciónalas explícitamente CITANDO AMBAS FUENTES.
-                
-                5. Si solo se encuentra información **parcial** en el contexto, debes aclararlo utilizando SIEMPRE la frase: 
-                    "con la información corporativa que conozco, no puedo responder completamente tu pregunta 🙁. pero he encontrado esta información No corporativa"
-                
-                6. Usa un lenguaje técnico apropiado pero comprensible. No repitas frases innecesarias ni agregues conclusiones fuera del alcance documental.
-                
-                RESPUESTAS SEGÚN TIPO DE ENTRADA
-                1. Si la entrada del usuario es una pregunta temática válida:
-
-                    * Responde basándote preferentemente en el contexto.
-
-                    * Si usas conocimientos externos, añade una nota:
-                        "con la información corporativa que conozco, no puedo responder completamente tu pregunta 🙁. pero he encontrado esta información No corporativa"
-
-                    * Incluye, si corresponde:
-
-                        * Fuentes consultadas con formato correcto.
-
-                        * Observaciones, si hay contradicción o falta de información.
-
-                        * Limitaciones, si aplica.
-
-                        * Cierra solo en este caso con: “¿Puedo ayudarte en algo más relacionado con este tema?”
-
-                2. Si la entrada del usuario es un saludo, despedida o mensaje breve no temático (como "sí", "no", "gracias", etc.):
-
-                    * Responde cordialmente según el caso.
-
-                    * No incluyas el mensaje de limitación ni la frase de cortesía o la frase “¿Puedo ayudarte en algo más relacionado con este tema?”
-
-                3. Si la pregunta está fuera del ámbito temático o no puede responderse ni con el contexto ni con conocimiento general:
-
-                    * Responde exclusivamente con el mensaje:
-                        "con la información corporativa que conozco, no puedo responder tu pregunta 🙁. También puedes probar preguntando de otra manera o consultando información adicional mediante nuestras líneas de atención o redes sociales"               
-                
-
-            IMPORTANTE: Nunca inventes, completes ni infieras información que no esté en el contexto o en conocimientos profesionales verificables. Cualquier dato externo debe diferenciarse claramente del contenido documental.
-            """
-
-        if not send_greeting:
-            system_message = SystemMessage(content=f"{prompt_detallado}\n\nContexto relevante:\n{contexto}")
-
-        messages = []
-        if system_message:
-            messages.append(system_message)
-
-        for msg in conversation_history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
-
-        messages.append(HumanMessage(content=message))
-
-        # Corrección del orden de mensajes y duplicidad
-        response = model.invoke(messages)
-        assistant_response = system_message.content if system_message else response.content
-        if type_message == "normal":
-            assistant_response = response.content
             
+        model = build_openai_model()  
+        greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna = download_greeting()        
+        prompt = built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna)
+        
+        # Mensajes del usuario
+        message = preprocess_message(message, conversation_history, closing)
+        
+        feedback_message = has_previous_feedback_response(conversation_history, feedback_comment)
+        
+        if message == "accept":
+            send_session_end, send_greeting = False, False
+            msg_type = "politica"            
+            role = "user"
+        elif message == "reject":
+            send_session_end, send_greeting = True, False
+            msg_type = "politica"            
+            role = "user"        
+        else:
+            if message == "NO":
+                send_feedback = True
+            elif message == "1" or message == "0":
+                send_comment = True
+            elif feedback_message:
+                send_thanks = True
+                send_session_end = True
+            msg_type = "normal"            
+            role = "user"
+            logging.info("No está respondiendo política")        
+            
+        add_message(conversation_history, role, message, message_id, now, msg_type, fuente, categories)
+        
+        # Respuestas del sistema
+        if send_greeting:
+            logging.info("Está enviando saludo")
+            system_message  = SystemMessage(content=f"Hola {user_name}, {greeting}")
+            msg_type = "politica"            
+            role = "assistant"
+            assistant_response = system_message.content        
+        elif send_feedback:
+            logging.info("Está enviando feedback")
+            system_message = SystemMessage(content=feedback)
+            msg_type = "feedback"  
+            role = "assistant"
+            assistant_response = system_message.content
+        elif send_comment:
+            logging.info("Está enviando comentario feedback")
+            system_message = SystemMessage(content=feedback_comment)
+            msg_type = "feedback"  
+            role = "assistant"
+            assistant_response = system_message.content
+        elif send_thanks:
+            logging.info("Está enviando agradecimiento comentario feedback")
+            combined_content = f"{thanks} \n {session_end}"
+            system_message = SystemMessage(content=combined_content)
+            session_status = "closed"
+            msg_type = "normal"  
+            role = "assistant"
+            assistant_response = system_message.content
+        elif send_session_end:
+            logging.info("Está enviando despedida")
+            system_message = SystemMessage(content=session_end)
+            session_status = "closed"
+            msg_type = "politica"  
+            role = "assistant"
+            assistant_response = system_message.content
+        else:
+            logging.info("Está enviando respuesta temática")
+            messages, categories = build_prompt_and_messages(conversation_history, message, na, prompt)
+            msg_type = "normal"
+            role = "assistant"
+            response = model.invoke(messages)
+            assistant_response = response.content
+            logging.info(f"assistant_response:{assistant_response}")
+            if assistant_response == infoexterna:                
+                combined_content = f"{assistant_response} \n {closing}"
+                logging.info(f"combined_content Entro:{combined_content}")
+                assistant_response = combined_content               
+        
         # Extraer fuentes usando patrón [DOCUMENTO]
-        fuentes = re.findall(r"\[(.*?)\]", assistant_response)
-        fuentes = drop_duplicates(fuentes)  # eliminar duplicados
+        fuente = re.findall(r"\[(.*?)\]", assistant_response)
+        fuente = drop_duplicates(fuente, na)  # eliminar duplicados
         
-        if "INFORMACIÓN CORPORATIVA" in fuentes:
-            categories = extract_categories(docs)        
+        print(f"Valor de fuente: {fuente!r} (tipo: {type(fuente)})")
         
-        logging.info(f"Categorías encontradas en documentos vectoriales: {categories}")
-
-        conversation_history.append({
-            "role": "assistant",
-            "content": assistant_response,
-            "date": now.isoformat(),
-            "messageId": message_id,
-            "type_message": type_message,
-            "fuente": fuentes,
-            "categories": categories
-        })
-
+        if fuente != [na]:
+            assistant_response = f"{assistant_response}\n\n{closing}"
+        else:
+            categories = na
+        
+        add_message(conversation_history, role, assistant_response, message_id, now, msg_type, fuente, categories)       
+        
+        # Cálculo de precio
+        pricing_info = process_webhook_pricing(value)        
+        price = calculate_pricing(user_id, pricing_info["category"])
+        
+        # Almacenamiento final        
         save_conversation(container, {
             "id": conversation_id,
             "userId": user_id,
-            "user_name": user_name,
+            "userName": user_name,
             "createdAt": createdAt.isoformat(),
             "updatedAt": updatedAt.isoformat(),
             "messages": conversation_history,
-            "session_status": session_status,
-            "whatsapp_bill": billable,
-            "whatsapp_category": pricing_category,
-            "whatsapp_pricing_model": pricing_model,
-            "whatsapp_cost_usd": price
+            "sessionStatus": session_status,
+            "whatsappBill": pricing_info["billable"],
+            "whatsappCategory": pricing_info["category"],
+            "whatsappPricingModel": pricing_info["pricing_model"],
+            "whatsappCostUSD": price
         })
-
-        return assistant_response
+        
+        return assistant_response 
+        
     except Exception as e:
         logging.error(f"ERROR - processing OpenAI request: {e}")
         raise
 
 
-
 def send_whatsapp_message(body, message):
     """Envía la respuesta a WhatsApp usando la API de Meta"""
     try:
+        
         whatsapp_token = get_secrets("whatsapp-token")
         secret_whatsapp_token = whatsapp_token.strip()
         value = body["entry"][0]["changes"][0]["value"]
@@ -522,7 +608,6 @@ def send_whatsapp_message(body, message):
             response = requests.post(url, json=data, headers=headers, verify=False)
             response.raise_for_status()
             json_response = response.json()
-            logging.info(f"json_response api:{json_response}")
             
             # Verifica si el mensaje fue aceptado
             if (

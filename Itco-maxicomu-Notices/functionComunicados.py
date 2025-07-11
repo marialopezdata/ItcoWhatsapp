@@ -4,70 +4,54 @@ import logging
 import pandas as pd
 import requests
 import time
-# import random   
-import azure.functions as func
-from azure.storage.blob import BlobServiceClient
-from azure.identity import DefaultAzureCredential
-from office365.sharepoint.files.file import File
-from office365.sharepoint.client_context import ClientContext
-from office365.runtime.auth.client_credential import ClientCredential
-from utils.azure_clients import get_cosmos_container, get_blob_container, get_secrets
-
-# # Conexión a Azure Blob Storage
-# credential = DefaultAzureCredential()
-# account_url = os.environ["storage_account_url"]
-# blob_service_client = BlobServiceClient(account_url=account_url, credential=credential)
-# container_name_baseCon = os.environ['storage_container_basecono']
-# container_name_baseVec = os.environ['storage_container_vectordb']
-
-# # Conexión a Sharepoint
-# sharepoint_site_url = os.environ["sharepoint_site_url"]
-# sharepoint_difusion_relativeurl = os.environ["sharepoint_difusion_relativeurl"]
-# sharepoint_images_relativeurl = os.environ["sharepoint_images_relativeurl"]
-# sharepoint_clientid = os.environ["sharepoint_clientid"]
-# sharepoint_clientsecret = os.environ["sharepoint_clientsecret"]
-# credentials = ClientCredential(sharepoint_clientid, sharepoint_clientsecret)
-# ctx = ClientContext(sharepoint_site_url).with_credentials(credentials)
+from datetime import datetime, timezone
+import utils.azure_clients as azure_clients
+import utils.utils as utils
 
 # Conexión a Whatsapp
 whatsapp_token = "Bearer EAATVIxJamLkBO8zxnPulQAzX6y5M3vHpLSDkeSWNtex3IDDyFrlWrIjj2WjNjSmdsJG5VBXPmHKGXT1DbQYaZAesb2IrDGNWKmTZBjTBv05jcDbqxlaxTQ0ZButKVe65Gf3thHHNsHd95anbdM0UA3HgfaxyoBPy0RF0rgoacPBFW0UB4nAzKvtfhhyCYQAwgZDZD"
 # whatsapp_token = os.environ.get("whatsapp_token", "")
 
-def read_announcements():  
-    """Descarga el mensaje para los comunicados desde un archivo de Excel ubicado en Storage Account."""
-    try: 
-        # blob_name = f"comunicados/textoComunicados.xlsx"
-        
-        # # Obtener una referencia al contenedor
-        # container_client = blob_service_client.get_container_client(container_name_baseCon)        
-        
-        # # Descargar el contenido del archivo
-        # blob_client = container_client.get_blob_client(blob_name)
-        # blob_data = blob_client.download_blob()
-        
-        # Obtener una referencia al contenedor
-        blob_container = get_blob_container("storage_container_basecono")
-        blob_client = blob_container.get_blob_client("comunicados/textoComunicados.xlsx")
-        
-        # Descargar el contenido del archivo        
-        blob_data = blob_client.download_blob()
-        
-        # Cargar el contenido del blob en un DataFrame de pandas
-        excel_bytes = io.BytesIO(blob_data.readall())
-        df = pd.read_excel(excel_bytes)        
-        
-        # Filtrar filas donde ENVIAR sea igual a S
-        df_activo = df[df['ENVIAR'].astype(str).str.upper() == 'S']
+# Definir tiempo máximo de conversación activa (24 horas)
+time_hours = int(os.environ.get("time_hours", 24))
 
-        if not df_activo.empty:
-            # Tomar el primer valor del campo TEXTO activo
-            message = df_activo.iloc[0]['TEXTO']
-            return message
-        else:
-            return "No hay mensajes activos"
-    except Exception as e:
-        logging.error(f"ERROR - getting greetings: {e}")
-        raise
+
+# def read_announcements():  
+#     """Descarga el mensaje para los comunicados desde un archivo de Excel ubicado en Storage Account."""
+#     try: 
+#         # blob_name = f"comunicados/textoComunicados.xlsx"
+        
+#         # # Obtener una referencia al contenedor
+#         # container_client = blob_service_client.get_container_client(container_name_baseCon)        
+        
+#         # # Descargar el contenido del archivo
+#         # blob_client = container_client.get_blob_client(blob_name)
+#         # blob_data = blob_client.download_blob()
+        
+#         # Obtener una referencia al contenedor
+#         blob_container = get_blob_container("storage_container_basecono")
+#         blob_client = blob_container.get_blob_client("comunicados/textoComunicados.xlsx")
+        
+#         # Descargar el contenido del archivo        
+#         blob_data = blob_client.download_blob()
+        
+#         # Cargar el contenido del blob en un DataFrame de pandas
+#         excel_bytes = io.BytesIO(blob_data.readall())
+#         df = pd.read_excel(excel_bytes)        
+        
+#         # Filtrar filas donde ENVIAR sea igual a S
+#         df_activo = df[df['ENVIAR'].astype(str).str.upper() == 'S']
+
+#         if not df_activo.empty:
+#             # Tomar el primer valor del campo TEXTO activo
+#             message = df_activo.iloc[0]['TEXTO']
+#             img = df_activo.iloc[0]['IMAGEN']
+#             return message, img
+#         else:
+#             return "No hay mensajes activos", None
+#     except Exception as e:
+#         logging.error(f"ERROR - getting greetings: {e}")
+#         raise
 
 
 def get_active_phone_numbers():  
@@ -83,7 +67,7 @@ def get_active_phone_numbers():
         # blob_data = blob_client.download_blob()
         
         # Obtener una referencia al contenedor
-        blob_container = get_blob_container("storage_container_basecono")
+        blob_container = azure_clients.get_blob_container("storage_container_basecono")
         blob_client = blob_container.get_blob_client("comunicados/contactos.xlsx")
         
         # Descargar el contenido del archivo        
@@ -106,25 +90,52 @@ def get_active_phone_numbers():
         raise
 
 
-def send_whatsapp_message(contacts, texto):
+
+def send_whatsapp_message(contacts, texto, img):
     """Envía un mensaje de WhatsApp a varios contactos usando la API de Meta."""
     try:
+        now = datetime.now(timezone.utc)
+        container = azure_clients.get_cosmos_container()
+        
+            
+        
         headers = {
             "Authorization": whatsapp_token,
             "Content-Type": "application/json",
-        }
+        }       
         
         logging.info(f"contacts:{contacts}") 
         
         phone_number_id="580789875119451"
         
-        url = f"https://graph.facebook.com/v22.0/580789875119451/messages"
+        url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
         for contact in contacts:
             contact = contact.strip()  # Elimina espacios o saltos de línea
 
             if not contact:
                 logging.info(f"no contact")
                 continue  # Evita enviar si el contacto está vacío
+            
+            conversation = utils.get_conversation(container, contact)
+
+            if conversation:
+                # conversation_id = conversation["id"]
+                conversation_history = conversation["messages"]
+                # createdAt = datetime.fromisoformat(conversation["createdAt"])
+                # updatedAt = now
+                
+                # if utils.already_processed(conversation_history, message_id):
+                #     logging.info(f"Mensaje con ID {message_id} ya fue procesado.")
+                #     return None
+                
+                if utils.should_close_conversation(conversation, now, time_hours):
+                    logging.info("Conversación cerrada o expirada. Se crea una nueva.")
+                    conversation["sessionStatus"] = "closed"
+                    utils.save_conversation(container, conversation)    
+            
+            conversation = utils.initialize_conversation(now, contact, "user_name")
+            
+            conversation_history = conversation["messages"]
 
             data = { 
                 "messaging_product": "whatsapp", 
@@ -144,7 +155,7 @@ def send_whatsapp_message(contacts, texto):
                                 {
                                     "type": "image",
                                     "image": {
-                                        "link": "https://itcorgprumaxicomuni9226.blob.core.windows.net/base-conocimiento/comunicados/Streaming%20Databricks%20microbatches%20frecuencia.png?sp=r&st=2025-07-04T22:52:38Z&se=2025-07-05T06:52:38Z&spr=https&sv=2024-11-04&sr=b&sig=VY5jsCIY3%2BrXLUJbxdFyPYZuoA1KE2%2FwX6wTYsbE7i0%3D"
+                                        "link": img
                                     }
                                 }
                             ]
@@ -156,7 +167,6 @@ def send_whatsapp_message(contacts, texto):
                                     "type": "text",
                                     "parameter_name": "nombre",
                                     "text": texto
-                                    # "text": "Carlos"
                                 }
                             ]
                         }
@@ -164,10 +174,32 @@ def send_whatsapp_message(contacts, texto):
                 } 
             }
             
+            # Cálculo de precio
+            # pricing_info = utils.process_webhook_pricing(value)        
+            # price = utils.calculate_pricing(user_id, pricing_info["category"])
 
             logging.info(f"Enviando mensaje a: {contact}")
             response = requests.post(url, headers=headers, json=data)
-            logging.info(F"response:{response}")
+            logging.info(F"response:{response.content}")
+            content = f"{texto} - imagen: {img}"
+            content_response = response.json()
+            message_id = content_response.get("messages", [{}])[0].get("id", "sin_id")
+            utils.add_message(conversation_history, "assistant", content, message_id, now, "campaña", "No Aplica", "No Aplica")
+            
+            utils.save_conversation(container, {
+                "id": conversation["id"],
+                "userId": conversation["userId"],
+                "userName": conversation["userName"],
+                "createdAt": now.isoformat(),
+                "updatedAt": now.isoformat(),
+                "messages": conversation_history,
+                "sessionStatus": conversation["sessionStatus"]
+                # "sessionStatus": conversation["sessionStatus"],
+                # "whatsappBill": pricing_info["billable"],
+                # "whatsappCategory": pricing_info["category"],
+                # "whatsappPricingModel": pricing_info["pricing_model"],
+                # "whatsappCostUSD": price
+            })
             time.sleep(1) 
             response.raise_for_status()
     except Exception as e:

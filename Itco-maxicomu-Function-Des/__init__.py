@@ -2,7 +2,7 @@ import logging
 import azure.functions as func
 import json
 from . import functionHttp
-from utils.azure_clients import get_secrets
+import utils.azure_clients as azure_clients
 
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
@@ -15,10 +15,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"body: {json.dumps(body, indent=2)}")
         
         # Extraer valores del JSON recibido
-        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
+        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})        
+        
+        statuses = value.get("statuses", [])
+        for status in statuses:
+            if status.get("status") != "read":
+                functionHttp.update_conversation_pricing_from_status(status)
         
         # Se evalúa si el evento recibido contiene mensajes vacíos
-        if "messages" not in value:
+        if "messages" not in value:            
             logging.info("Evento no contiene mensajes, ignorado.")
             return func.HttpResponse("Evento sin mensajes, ignorado.", status_code=200)
         
@@ -50,8 +55,15 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         func.HttpResponse(json.dumps(response_data), status_code=200)
         
         # Obtener respuesta de OpenAI y enviar el mensaje
+        # response_text = functionHttp.openai_request(value)
         response_text = functionHttp.openai_request(value)
-        functionHttp.send_whatsapp_message(body, response_text)
+
+        if response_text.get("type") == "interactive":
+            functionHttp.send_whatsapp_message(body, response_text["content"], interactive=True)
+        else:
+            functionHttp.send_whatsapp_message(body, response_text["content"])
+        # functionHttp.send_whatsapp_message(body, response_text)       
+        
         return func.HttpResponse(json.dumps({"response": response_text}), status_code=200)
     except json.JSONDecodeError:
         return func.HttpResponse(json.dumps({"error": "Error al procesar JSON"}), status_code=400)
@@ -64,7 +76,7 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
 
 def handle_verification(req: func.HttpRequest) -> func.HttpResponse:
     """ Maneja la verificación del Webhook de WhatsApp Business API """
-    secret_verify_token = get_secrets("webhook-token") 
+    secret_verify_token = azure_clients.get_secrets("webhook-token") 
     verify_token_wa = req.params.get("hub.verify_token")
     challenge = req.params.get("hub.challenge", "")
 
