@@ -30,7 +30,8 @@ def built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativ
                     5. Si solo se encuentra información **parcial** en el contexto, debes aclararlo utilizando SIEMPRE la frase: 
                         "{infonocorporativa}"
                     
-                    6. Usa un lenguaje técnico apropiado pero comprensible. No repitas frases innecesarias ni agregues conclusiones fuera del alcance documental.
+                    6. Usa un lenguaje técnico apropiado pero comprensible. No repitas frases innecesarias, no incluyas conclusiones fuera del alcance documental 
+                        y no añadas preguntas finales como "¿puedo ayudarte en algo más?" bajo ninguna circunstancia.
                     
                     RESPUESTAS SEGÚN TIPO DE ENTRADA
                     1. Si la entrada del usuario es una pregunta temática válida:
@@ -47,6 +48,8 @@ def built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativ
                             * Observaciones, si hay contradicción o falta de información.
 
                             * Limitaciones, si aplica.
+                        
+                        * No incluyas preguntas de seguimiento como “¿en qué más puedo ayudarte?”, “¿necesitas algo más?”, ni similares.
 
                     2. Si la entrada del usuario es un saludo, despedida o mensaje breve no temático (como "sí", "no", "gracias", etc.):
 
@@ -59,7 +62,11 @@ def built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativ
                         * Responde exclusivamente con el mensaje:
                             "{infoexterna}"                   
 
-                IMPORTANTE: Nunca inventes, completes ni infieras información que no esté en el contexto o en conocimientos profesionales verificables. Cualquier dato externo debe diferenciarse claramente del contenido documental.
+                IMPORTANTE: Nunca inventes, completes ni infieras información que no esté en el contexto o en conocimientos profesionales verificables. Cualquier dato externo debe diferenciarse claramente del 
+                contenido documental.
+                BAJO NINGUNA CIRCUNSTANCIA incluyas frases finales del tipo:
+                    “¿Puedo ayudarte en algo más?”, “¿Necesitas algo más?”, “¿En qué más te puedo colaborar?”, ni ningún tipo de pregunta de seguimiento o despedida.
+                    El contenido debe terminar estrictamente con la última palabra de la respuesta técnica.
                 
     """
 

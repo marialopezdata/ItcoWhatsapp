@@ -1,14 +1,8 @@
 import io
-# import os
 import uuid
 import logging
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-# from functools import lru_cache
-# from azure.cosmos import CosmosClient
-# from azure.keyvault.secrets import SecretClient
-# from azure.storage.blob import BlobServiceClient
-# from azure.identity import DefaultAzureCredential
 import utils.azure_clients as azure_clients
 
 
@@ -32,9 +26,10 @@ def get_conversation(container, userId):
         raise
 
 
-def should_close_conversation(conversation, now, time_hours):
+def should_close_conversation(conversation, time_hours):
     """Determina si debe cerrarse una conversación existente."""
     try:
+        now = datetime.now(timezone.utc)
         created_at = datetime.fromisoformat(conversation["createdAt"])
         expired = (now - created_at) >= timedelta(hours=time_hours)
         manually_closed = conversation["sessionStatus"] == "closed"
@@ -42,6 +37,21 @@ def should_close_conversation(conversation, now, time_hours):
     except Exception as e:
         logging.error(f"ERROR - closing conversation: {e}")
         raise
+
+
+def should_close_by_inactivity(conversation, time_minutes):
+    """Retorna True si han pasado más de time_minutes desde el último mensaje del usuario."""
+    now = datetime.now(timezone.utc)
+    if not conversation.get("messages"):
+        return False
+    for msg in reversed(conversation["messages"]):
+        if msg["role"] == "user":
+            last_user_time = datetime.fromisoformat(msg["date"])
+            break
+    else:
+        return False  # No hay mensajes de usuario
+
+    return (now - last_user_time) > timedelta(minutes=time_minutes)
 
 
 def already_processed(conversation_history, message_id):
@@ -53,9 +63,10 @@ def already_processed(conversation_history, message_id):
         raise
 
 
-def initialize_conversation(now, user_id, user_name):
+def initialize_conversation(user_id, user_name):
     """Inicializa una nueva conversación."""
     try:
+        now = datetime.now(timezone.utc)
         return {
             "id": str(uuid.uuid4()),
             "userId": user_id,
@@ -81,9 +92,16 @@ def save_conversation(container, new_conversation_data):
         raise
 
 
-def add_message(history, role, content, message_id, now, msg_type, fuente, categories):
+def flatten_list(l):
+    return [item for sublist in l for item in sublist] if any(isinstance(i, list) for i in l) else l
+
+
+def add_message(history, role, content, message_id, msg_type, fuente, categories):
     """Adiciona un mensaje al historial."""
     try:
+        fuente = flatten_list(fuente)
+        categories = flatten_list(categories)
+        now = datetime.now(timezone.utc)
         history.append({
             "role": role,
             "content": content,

@@ -2,7 +2,6 @@ import json
 import logging
 import azure.functions as func
 from . import functionComunicados
-# from datetime import datetime, timedelta, timezone
 import utils.azure_clients as azure_clients
 
 def main(req: func.HttpRequest) -> func.HttpResponse:
@@ -16,15 +15,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"body: {json.dumps(body, indent=2)}")
         
         communications = body.get("communication", [])
-        
-        
-        # ejecucion, img = functionComunicados.read_announcements()
-
-        # if ejecucion == "No hay mensajes activos":
-        #     return func.HttpResponse("Sin mensajes activos", status_code=200)
-        
-        # texto = body.get("texto", "")
-        # img = body.get("img", "")
         
         contactos = functionComunicados.get_active_phone_numbers()
         
