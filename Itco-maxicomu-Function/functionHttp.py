@@ -1,27 +1,29 @@
-import uuid
 import os
 import re
-import io
+# import io
 import re
+# import uuid
 import pickle
 import logging
 import requests
 import faiss
 import tempfile
-import pandas as pd
+# import pandas as pd
 from datetime import datetime, timedelta, timezone
 from langchain.vectorstores.faiss import FAISS
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 from langchain.chat_models import AzureChatOpenAI
 from langchain_openai import AzureOpenAIEmbeddings
-from utils.azure_clients import get_cosmos_container, get_blob_container, get_secrets
+import utils.azure_clients as azure_clients
 from utils.prompt import built_prompt
+import utils.utils as utils
 
 
 # Variables de entorno
 # Definir tiempo máximo de conversación activa (24 horas)
 time_hours = int(os.environ.get("time_hours", 24))
-secret_openai_api_key = get_secrets("openai-api-key")
+time_minutes = int(os.environ.get("time_minutes", 1))
+secret_openai_api_key = azure_clients.get_secrets("openai-api-key")
 azure_endpoint = os.environ["AZURE_ENDPOINT"]
 api_version = os.environ["openai_api_version"]
 
@@ -30,7 +32,7 @@ def download_greeting():
     """Descarga el saludo y despedida de un archivo de texto ubicado en Storage Account."""
     try: 
         # Obtener una referencia al contenedor
-        blob_container = get_blob_container("storage_container_basecono")
+        blob_container = azure_clients.get_blob_container("storage_container_basecono")
         blob_client = blob_container.get_blob_client("plano/SaludoDespedida.txt")
         
         # Descargar el contenido del archivo        
@@ -40,8 +42,7 @@ def download_greeting():
         try:
             pattern = r"(?m)^(\w+):\s*([\s\S]+?)(?=\n\w+:|\Z)"
             matches = re.findall(pattern, file_content)
-            sections = {key: value.strip() for key, value in matches}        
-            logging.info("Secciones extraídas correctamente.")
+            sections = {key: value.strip() for key, value in matches}    
         except Exception as regex_err:
             logging.error(f"Error en regex: {str(regex_err)}")
             matches = []
@@ -69,7 +70,7 @@ def download_vectorialdb():
     try:
         
         # Cliente de Blob      
-        blob_container = get_blob_container("storage_container_vectordb")
+        blob_container = azure_clients.get_blob_container("storage_container_vectordb")
 
         # Descargar y leer faiss index
         data = blob_container.get_blob_client("index.faiss").download_blob().readall()
@@ -103,35 +104,6 @@ def download_vectorialdb():
 
     except Exception as e:
         logging.error("ERROR al cargar base vectorial", exc_info=True)
-        raise
-
-
-def get_conversation(container, userId):
-    """Obtiene las conversaciones almacenadas en la BD para cada usuario."""
-    try:        
-        # Ordenar por createdAt DESC y tomar el primero
-        query = "SELECT * FROM c WHERE c.userId = @userId ORDER BY c.createdAt DESC OFFSET 0 LIMIT 1"
-        
-        # Ejecutar la consulta con parámetros
-        existing_conversations = list(
-            container.query_items(
-                query=query,
-                parameters=[{"name": "@userId", "value": userId}],
-                enable_cross_partition_query=True
-            )
-        )        
-        return existing_conversations[0] if existing_conversations else None    
-    except Exception as e:
-        logging.error(f'ERROR - getting conversation in database: {e}')
-        raise        
-
-
-def save_conversation(container, new_conversation_data):
-    """Guarda la conversación en la Base de Datos."""
-    try:       
-        container.upsert_item(new_conversation_data)        
-    except Exception as e:
-        logging.error(f'ERROR - getting conversation in database: {e}')
         raise
 
 
@@ -199,68 +171,80 @@ def drop_duplicates (lista: list, na):
         raise
 
 
-def process_webhook_pricing(value):
-    """Extrae la información facturable de la conversación desde el webhook."""
+def update_conversation_pricing_from_status(status: dict):
+    """Procesa un status de WhatsApp y actualiza el documento correspondiente con pricing en Cosmos DB."""
     try:
-        pricing = value.get("pricing", {})
-        if pricing:
-            return {
-                "billable": pricing.get("billable", True),
-                "category": pricing.get("category", "unknown"),
-                "pricing_model": pricing.get("pricing_model", "CBP")
-            }
+        now = datetime.now(timezone.utc)
+        container = azure_clients.get_cosmos_container()
+        message_id = status.get("id")
+
+        # Obtener valores de pricing
+        pricing_info = utils.process_webhook_pricing(status)
+        category = pricing_info["category"]
+        billable = pricing_info["billable"]
+        pricing_model = pricing_info["pricing_model"]
+        status_value = status.get("status")
+        
+        logging.info(f"Procesando status de mensaje: {message_id} con categoría: {category}")
+
+        # Consultar conversación que contenga ese message_id
+        query = f"""
+        SELECT * FROM c
+        WHERE EXISTS (
+            SELECT VALUE m FROM m IN c.messages
+            WHERE m.messageId = '{message_id}'
+        )
+        """
+        items = list(container.query_items(query=query, enable_cross_partition_query=True))
+
+        if not items:
+            logging.warning(f"No se encontró conversación con messageId {message_id}")
+            return
+
+        doc = items[0]
+        user_id = doc.get("userId", "")
+        
+        if not user_id:
+            logging.warning(f"Documento sin userId, no se puede calcular precio")
+            return
+
+        cost_usd = utils.calculate_pricing(user_id, category) if billable else 0
+        
+        # Buscar mensaje y agregarle el pricing
+        found = False
+        for m in doc.get("messages", []):
+            if m.get("messageId") == message_id:
+                if "whatsappPricing" in m:
+                    logging.info(f"[SKIP] Mensaje {message_id} ya tiene pricing, no se sobrescribe.")
+                    return  # ya tiene precio, no lo modificamos
+
+                # Si no existe, lo agregamos
+                m["whatsappPricing"] = {
+                    "billable": billable,
+                    "category": category,
+                    "pricing_model": pricing_model,
+                    "cost_usd": cost_usd,
+                    "status": status_value
+                }
+                found = True
+                break
+
+        if not found:
+            logging.warning(f"No se encontró el mensaje {message_id} en los mensajes de la conversación.")
+            return
+
+        # Calcular el total acumulado de la conversación
+        total_cost = utils.calculate_total_cost(doc)
+        doc["totalCostUSD"] = total_cost
+        doc["updatedAt"] = now.isoformat()
+
+        # Guardar conversación actualizada
+        container.upsert_item(doc)
+
+        logging.info(f"[OK] Guardado pricing para mensaje: {message_id} | ${cost_usd:.4f}")
+
     except Exception as e:
-        logging.warning(f"No se pudo procesar el pricing: {e}")
-    return {"billable": False, "category": "service", "pricing_model": "N/A"}
-
-
-def whatsapp_pricing_usd():
-    """Obtiene la información del costo de la conversación para hacer el cálculo."""
-    try:
-        # Obtener una referencia al contenedor
-        blob_container = get_blob_container("storage_container_basecono")
-        blob_client = blob_container.get_blob_client("comunicados/costos.xlsx")
-        
-        # Descargar el contenido del archivo        
-        blob_data = blob_client.download_blob()
-        
-        # Cargar el contenido del blob en un DataFrame de pandas
-        excel_bytes = io.BytesIO(blob_data.readall())
-        df = pd.read_excel(excel_bytes) 
-        
-        return df
-    except Exception as e:
-        logging.error(f'ERROR - getting whatsapp pricing: {e}')
-        raise
-
-
-def calculate_pricing(user_id, pricing_category: str):
-    """Calcula el costo de la conversación."""
-    try:
-        price = 0
-        
-        df = whatsapp_pricing_usd()
-        
-        if user_id.startswith("57"):
-            country = "CO"
-        else:
-            country = "UNKNOWN"        
-        
-        # Filtrar filas donde encuentre el país
-        df_filtered = df[
-            (df['PAIS'].astype(str).str.upper() == country) & 
-            (df['CATEGORIA'].astype(str).str.upper() == pricing_category.upper())
-            ]
-        
-        if not df_filtered.empty:
-            price = df_filtered['PRECIOUSD'].iloc[0]            
-        else:
-            logging.info("No se encontró un precio para esa combinación.")
-            
-        return price
-    except Exception as e:
-        logging.error(f'ERROR - calculating price: {e}')
-        raise
+        logging.error(f"ERROR - procesando status webhook: {e}")
 
 
 def build_openai_model():
@@ -278,11 +262,37 @@ def build_openai_model():
         raise
 
 
+def extract_user_message(value):
+    """
+    Extrae el contenido textual del mensaje del usuario, manejando texto plano o botones interactivos.
+    """
+    try:
+        message = value["messages"][0]
+        msg_type = message["type"]
+        
+        if msg_type == "text":
+            return message["text"]["body"]
+        elif msg_type == "interactive":
+            interaction = message["interactive"]
+            if interaction["type"] == "button_reply":
+                return interaction["button_reply"].get("id") 
+            elif interaction["type"] == "list_reply":
+                return interaction["list_reply"]["title"]
+            else:
+                return f"[Tipo interactivo desconocido: {interaction['type']}]"
+        else:
+            return f"[Mensaje tipo {msg_type} no manejado]"
+    
+    except Exception as e:
+        logging.error(f"Error al extraer mensaje del usuario: {e}")
+        return "[Error al leer mensaje]"
+
+
 def preprocess_message(message, conversation_history, closing):
     """Estadariza ciertas expresiones que se pueden encontrar en el mensaje recibido."""
     try:
         msg = message.strip().upper()
-        
+        afirmaciones = ["SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"]
         close_message = has_previous_closing_response(conversation_history, closing)        
         
         if "SERVIDUMBRE" in msg:
@@ -290,77 +300,14 @@ def preprocess_message(message, conversation_history, closing):
                         "Estoy haciendo una consulta legal sobre una servidumbre eléctrica, servidumbre de transmisión de energía o servidumbre de transmisión de energía y telecomunicaciones. "
                         "Por favor, responde en ese contexto. " + message
                     )
-        elif msg in {"SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"} and close_message:
+        elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
             message = "SI"
-        elif msg in {"SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"}:
-            message = "accept"
-        elif msg == "NO" and close_message:
+        elif close_message and (re.search(r"\bNO\b", msg) or re.search(r"\bRECHAZO\b", msg)):
             message = "NO"
-        elif msg == "NO":
-            message = "reject"        
-        elif msg.strip() == "👍":
-            message = "1"
-        elif msg.strip() == "👎":
-            message = "0"
         
         return message
     except Exception as e:
         logging.error(f"ERROR - processing message: {e}")
-        raise
-
-
-def initialize_conversation(now, user_id, user_name):
-    """Inicializa una nueva conversación."""
-    try:
-        return {
-            "id": str(uuid.uuid4()),
-            "userId": user_id,
-            "userName": user_name,
-            "createdAt": now,
-            "updatedAt": datetime(1900, 1, 1),
-            "messages": [],
-            "sessionStatus": "opened"
-        }
-    except Exception as e:
-        logging.error(f"ERROR - initializing conversation: {e}")
-        raise
-
-
-def should_close_conversation(conversation, now, time_hours):
-    """Determina si debe cerrarse una conversación existente."""
-    try:
-        created_at = datetime.fromisoformat(conversation["createdAt"])
-        expired = (now - created_at) >= timedelta(hours=time_hours)
-        manually_closed = conversation["sessionStatus"] == "closed"
-        return expired or manually_closed
-    except Exception as e:
-        logging.error(f"ERROR - closing conversation: {e}")
-        raise
-
-
-def already_processed(conversation_history, message_id):
-    """Determina si el mensaje ya fue procesado."""
-    try:
-        return any(msg.get("messageId") == message_id and msg["role"] == "assistant" for msg in conversation_history)
-    except Exception as e:
-        logging.error(f"ERROR - validating existing conversation: {e}")
-        raise
-
-
-def add_message(history, role, content, message_id, now, msg_type, fuente, categories):
-    """Adiciona un mensaje al historial."""
-    try:
-        history.append({
-            "role": role,
-            "content": content,
-            "date": now.isoformat(),
-            "messageId": message_id,
-            "typeMessage": msg_type,
-            "fuente": fuente,
-            "categories": categories
-        })
-    except Exception as e:
-        logging.error(f"ERROR - adding message: {e}")
         raise
 
 
@@ -392,9 +339,12 @@ def build_prompt_and_messages(history, message, na, prompt):
 def has_previous_closing_response(history, closing):
     """Devuelve True si ya existe un mensaje de cierre previo del asistente."""
     try:
+        closing_normalized = closing.lower().strip()
         for msg in history:
-            if msg["role"] == "assistant" and closing in msg.get("content", ""):
-                return True
+            if msg["role"] == "assistant":
+                content = msg.get("content", "").lower().strip()
+                if closing_normalized in content:
+                    return True
         return False
     except Exception as e:
         logging.error(f"ERROR - consulting previous closing: {e}")
@@ -413,41 +363,67 @@ def has_previous_feedback_response(history, feedback_comment):
         raise
 
 
+def check_user_inactivity(conversation, now=None, threshold_minutes=1):
+    """
+    Cierra la conversación si el último mensaje del usuario fue hace más de `threshold_minutes`.
+    Retorna True si la conversación fue cerrada.
+    """
+    now = now or datetime.now(timezone.utc)
+    messages = conversation.get("messages", [])
+    
+    # Buscar el último mensaje del usuario
+    last_user_message = next((m for m in reversed(messages) if m["role"] == "user"), None)
+    
+    if not last_user_message:
+        return False  # No hay mensaje del usuario aún
+    
+    last_user_time = datetime.fromisoformat(last_user_message.get("timestamp"))
+    
+    if now - last_user_time > timedelta(minutes=threshold_minutes):
+        logging.info(f"Sesión {conversation['id']} cerrada por inactividad de más de {threshold_minutes} minutos.")
+        conversation["sessionStatus"] = "closed"
+        conversation["updatedAt"] = now.isoformat()
+        return True
+    
+    return False
+
+
 def openai_request(value):
     """Procesa el mensaje, obtiene respuesta de OpenAI y almacena la conversación en CosmosDB."""
     try:      
         # Datos principales
         value_messages = value.get("messages", [{}])[0]
-        message = value_messages["text"]["body"]
+        message = extract_user_message(value)
         message_id = value_messages["id"]
         user_id = value_messages["from"]
         user_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "Usuario")
-        na = "No Aplica"
+        na = ["No Aplica"]
         categories = na
         fuente = na    
         send_greeting, send_feedback, send_session_end, send_comment, send_thanks = False, False, False, False, False
         session_status = "opened"
         now = datetime.now(timezone.utc)
+        response_type = "text"       
         
-        container = get_cosmos_container()
+        container = azure_clients.get_cosmos_container()
 
-        conversation = get_conversation(container, user_id)
+        conversation = utils.get_conversation(container, user_id)
 
         if conversation:
             conversation_id = conversation["id"]
             conversation_history = conversation["messages"]
             createdAt = datetime.fromisoformat(conversation["createdAt"])
-            updatedAt = now
+            updatedAt = now        
             
-            if already_processed(conversation_history, message_id):
+            if utils.already_processed(conversation_history, message_id):
                 logging.info(f"Mensaje con ID {message_id} ya fue procesado.")
                 return None
             
-            if should_close_conversation(conversation, now, time_hours):
+            if utils.should_close_conversation(conversation, time_hours):
                 logging.info("Conversación cerrada o expirada. Se crea una nueva.")
                 conversation["sessionStatus"] = "closed"
-                save_conversation(container, conversation)
-                conversation = initialize_conversation(now, user_id, user_name)
+                utils.save_conversation(container, conversation)
+                conversation = utils.initialize_conversation(user_id, user_name)
                 conversation_id = conversation["id"]
                 createdAt = now
                 conversation_history = conversation["messages"] 
@@ -457,7 +433,7 @@ def openai_request(value):
                 send_greeting = True
         else:
             logging.info("No existe ninguna. Se crea una nueva.")
-            conversation = initialize_conversation(now, user_id, user_name)
+            conversation = utils.initialize_conversation(user_id, user_name)
             conversation_id = conversation["id"]
             createdAt = now
             updatedAt = datetime(1900, 1, 1)
@@ -469,6 +445,7 @@ def openai_request(value):
         prompt = built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna)
         
         # Mensajes del usuario
+        logging.info(f"message:{message}")
         message = preprocess_message(message, conversation_history, closing)
         
         feedback_message = has_previous_feedback_response(conversation_history, feedback_comment)
@@ -486,32 +463,61 @@ def openai_request(value):
                 send_feedback = True
             elif message == "1" or message == "0":
                 send_comment = True
+                msg_type = "feedback" 
             elif feedback_message:
                 send_thanks = True
                 send_session_end = True
-            msg_type = "normal"            
+                msg_type = "feedback_comment" 
+            if "msg_type" not in locals():
+                msg_type = "normal"           
             role = "user"
             logging.info("No está respondiendo política")        
             
-        add_message(conversation_history, role, message, message_id, now, msg_type, fuente, categories)
+        utils.add_message(conversation_history, role, message, message_id, msg_type, fuente, categories)
         
         # Respuestas del sistema
         if send_greeting:
             logging.info("Está enviando saludo")
-            system_message  = SystemMessage(content=f"Hola {user_name}, {greeting}")
+            assistant_response = f"Hola {user_name}, {greeting} ✅ Acepto ❌ No acepto"            
             msg_type = "politica"            
             role = "assistant"
-            assistant_response = system_message.content        
+            response_type = "interactive"
+            
+            response_content = {
+                "type": "button",
+                "body": {
+                    "text": f"Hola {user_name}, {greeting}"
+                },
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": "accept", "title": "✅ Acepto"}},
+                        {"type": "reply", "reply": {"id": "reject", "title": "❌ No acepto"}}
+                    ]
+                }
+            }   
         elif send_feedback:
             logging.info("Está enviando feedback")
-            system_message = SystemMessage(content=feedback)
-            msg_type = "feedback"  
+            assistant_response = f"{feedback} 👍 Si 👎 No"
+            msg_type = "feedback" 
             role = "assistant"
-            assistant_response = system_message.content
+            response_type = "interactive"
+            
+            response_content = {
+                "type": "button",
+                "body": {
+                    "text": f"{feedback}"
+                },
+                "action": {
+                    "buttons": [
+                        {"type": "reply", "reply": {"id": "1", "title": "👍 Si"}},
+                        {"type": "reply", "reply": {"id": "0", "title": "👎 No"}}
+                    ]
+                }
+            }           
         elif send_comment:
             logging.info("Está enviando comentario feedback")
             system_message = SystemMessage(content=feedback_comment)
-            msg_type = "feedback"  
+            msg_type = "feedback_comment"  
             role = "assistant"
             assistant_response = system_message.content
         elif send_thanks:
@@ -539,54 +545,71 @@ def openai_request(value):
             logging.info(f"assistant_response:{assistant_response}")
             if assistant_response == infoexterna:                
                 combined_content = f"{assistant_response} \n {closing}"
-                logging.info(f"combined_content Entro:{combined_content}")
                 assistant_response = combined_content               
         
         # Extraer fuentes usando patrón [DOCUMENTO]
         fuente = re.findall(r"\[(.*?)\]", assistant_response)
         fuente = drop_duplicates(fuente, na)  # eliminar duplicados
         
-        print(f"Valor de fuente: {fuente!r} (tipo: {type(fuente)})")
-        
         if fuente != [na]:
             assistant_response = f"{assistant_response}\n\n{closing}"
         else:
-            categories = na
+            categories = na        
         
-        add_message(conversation_history, role, assistant_response, message_id, now, msg_type, fuente, categories)       
+        utils.add_message(conversation_history, role, assistant_response, message_id, msg_type, fuente, categories)       
         
-        # Cálculo de precio
-        pricing_info = process_webhook_pricing(value)        
-        price = calculate_pricing(user_id, pricing_info["category"])
+        # Cálculo de precio para el caso de los mensajes uno a uno 
+        pricing_info = utils.process_webhook_pricing(value)        
+        price = utils.calculate_pricing(user_id, pricing_info["category"])
+        
+        whatsapp_pricing = {
+            "billable": pricing_info["billable"],
+            "category": pricing_info["category"],
+            "pricing_model": pricing_info["pricing_model"],
+            "cost_usd": price,
+            "status": "service"
+            }
+        
+        # Agregar pricing al último mensaje del bot (assistant)
+        for msg in reversed(conversation_history):
+            if msg["role"] == "assistant" and msg.get("messageId") == message_id:
+                msg["whatsappPricing"] = whatsapp_pricing
+                break        
         
         # Almacenamiento final        
-        save_conversation(container, {
+        utils.save_conversation(container, {
             "id": conversation_id,
             "userId": user_id,
             "userName": user_name,
             "createdAt": createdAt.isoformat(),
             "updatedAt": updatedAt.isoformat(),
             "messages": conversation_history,
-            "sessionStatus": session_status,
-            "whatsappBill": pricing_info["billable"],
-            "whatsappCategory": pricing_info["category"],
-            "whatsappPricingModel": pricing_info["pricing_model"],
-            "whatsappCostUSD": price
+            "sessionStatus": session_status
         })
         
-        return assistant_response 
+        if response_type == "interactive":
+            return {
+                "type": "interactive",
+                "content": response_content
+            }
+        else:
+            return {
+                "type": "text",
+                "content": assistant_response
+            }
         
     except Exception as e:
         logging.error(f"ERROR - processing OpenAI request: {e}")
         raise
 
 
-def send_whatsapp_message(body, message):
+def send_whatsapp_message(body, message, interactive=False):
     """Envía la respuesta a WhatsApp usando la API de Meta"""
     try:
-        
-        whatsapp_token = get_secrets("whatsapp-token")
+        whatsapp_token = azure_clients.get_secrets("whatsapp-token")
+        # whatsapp_token = "EAAC6V72YFxwBOzkOGTdny2Hyaqr1jctYAI7MjquF3lSWRxav9ApyeRUz810fcadshfJSbJgKl7C9jwjNhHA5msTfFkVBHwgcorYrqJ6hZBLWsmrvLRHExmyodSpKofzpolHMAXHxHSPEiQbD2Sk5kZAaZAIhtc2cSy9DrocMRyGAMMMaZAMXqXLIjIiRGSkR"
         secret_whatsapp_token = whatsapp_token.strip()
+        logging.info(f"secret_whatsapp_token:{secret_whatsapp_token}")
         value = body["entry"][0]["changes"][0]["value"]
         phone_number_id = value["metadata"]["phone_number_id"]
         from_number = value["messages"][0]["from"]
@@ -597,13 +620,21 @@ def send_whatsapp_message(body, message):
         
         url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
         
-        data = {
-            "messaging_product": "whatsapp",
-            "to": from_number,
-            "type": "text",
-            "text": {"body": message},
-        }
-        
+        # Determinar si se debe enviar un mensaje de texto o interactivo
+        if interactive:
+            data = {
+                "messaging_product": "whatsapp",
+                "to": from_number,
+                "type": "interactive",
+                "interactive": message  # Aquí se espera que `message` ya sea el dict con botones
+            }
+        else:
+            data = {
+                "messaging_product": "whatsapp",
+                "to": from_number,
+                "type": "text",
+                "text": {"body": message},
+            }               
         try:
             response = requests.post(url, json=data, headers=headers, verify=False)
             response.raise_for_status()
@@ -618,6 +649,8 @@ def send_whatsapp_message(body, message):
             else:
                 logging.warning(f"Respuesta inesperada: {json_response}")
         
+        except KeyError as ke:
+            logging.error(f"Clave faltante en el cuerpo del mensaje: {ke}")
         except requests.exceptions.HTTPError as http_err:
             status_code = getattr(http_err.response, "status_code", "N/A")
             content = getattr(http_err.response, "text", str(http_err))
@@ -625,14 +658,8 @@ def send_whatsapp_message(body, message):
                 logging.warning("Rate limit alcanzado.")
             else:
                 logging.error(f"HTTP error al enviar: {status_code} - {content}")
-        
         except requests.exceptions.RequestException as req_err:
             logging.error(f"Error de red al enviar mensaje: {req_err}")
-        
-        except Exception as e:
-            logging.exception("Error inesperado al enviar el mensaje a WhatsApp")
-        
-    except KeyError as ke:
-        logging.error(f"Clave faltante en el cuerpo del mensaje: {ke}")
     except Exception as e:
-        logging.exception("ERROR - al preparar datos para enviar mensaje de WhatsApp")
+        logging.exception("Error inesperado al enviar el mensaje a WhatsApp")
+        return None

@@ -18,26 +18,50 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         
         contactos = functionComunicados.get_active_phone_numbers()
         
+        errores_totales = []
+        
         for item in communications:
             
             logging.info(f"Enviando a: {contactos}")
+            template_name = item.get("template", "")
             texto = item.get("texto", "")
-            imagen_url = item.get("img", "")
+            header_url = item.get("header")
+            url_button = item.get("button")
         
+            if not isinstance(template_name, str) or not template_name:
+                return func.HttpResponse("Imagen inválida", status_code=400)
+            
             if not isinstance(texto, str) or not texto:
                 return func.HttpResponse("Texto inválido", status_code=400)
 
-            if not isinstance(imagen_url, str) or not imagen_url:
-                return func.HttpResponse("Imagen inválida", status_code=400)
+            # if not isinstance(imagen_url, str) or not imagen_url:
+            #     return func.HttpResponse("Imagen inválida", status_code=400)
+            
+            if header_url is not None and not isinstance(header_url, str):
+                return func.HttpResponse("URL header inválida", status_code=400)
+            
+            if url_button is not None and not isinstance(url_button, str):
+                return func.HttpResponse("URL botón inválida", status_code=400)
+            
+            errores = functionComunicados.send_whatsapp_message(contactos, template_name, texto, header_url, url_button)
+            errores_totales.extend(errores)
+            
+            # functionComunicados.send_whatsapp_message(contactos, template_name, texto, header_url, url_button)
 
-            functionComunicados.send_whatsapp_message(contactos, texto, imagen_url)
+        # return func.HttpResponse("Envío ejecutado correctamente", status_code=200)
+        if errores_totales:
+            logging.warning(f"Envío completado con errores: {errores_totales}")
+            return func.HttpResponse(
+                json.dumps({"mensaje": "Algunos envíos fallaron", "errores": errores_totales}, indent=2),
+                status_code=207,
+                mimetype="application/json"
+            )
 
         return func.HttpResponse("Envío ejecutado correctamente", status_code=200)
 
     except Exception as e:
         logging.error(f"Error en ejecución: {e}")
         return func.HttpResponse("Error al ejecutar envío", status_code=500)
-
 
 def handle_verification(req: func.HttpRequest) -> func.HttpResponse:
     """ Maneja la verificación del Webhook de WhatsApp Business API """

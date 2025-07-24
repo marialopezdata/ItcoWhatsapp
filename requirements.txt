@@ -25,3 +25,4 @@ langchain-community==0.0.28
 Office365-REST-Python-Client
 pandas
 openpyxl
+unidecode

@@ -8,6 +8,7 @@ import logging
 import requests
 import faiss
 import tempfile
+from unidecode import unidecode
 # import pandas as pd
 from datetime import datetime, timedelta, timezone
 from langchain.vectorstores.faiss import FAISS
@@ -291,8 +292,10 @@ def extract_user_message(value):
 def preprocess_message(message, conversation_history, closing):
     """Estadariza ciertas expresiones que se pueden encontrar en el mensaje recibido."""
     try:
-        msg = message.strip().upper()
+        msg = unidecode(message.strip().upper())
         afirmaciones = ["SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"]
+        negaciones = ["NO", "NO GRACIAS", "NO, QUIERO", "NO, GRACIAS", "RECHAZO", "NO ESTOY DE ACUERDO", "NO QUIERO"]
+
         close_message = has_previous_closing_response(conversation_history, closing)        
         
         if "SERVIDUMBRE" in msg:
@@ -300,10 +303,11 @@ def preprocess_message(message, conversation_history, closing):
                         "Estoy haciendo una consulta legal sobre una servidumbre eléctrica, servidumbre de transmisión de energía o servidumbre de transmisión de energía y telecomunicaciones. "
                         "Por favor, responde en ese contexto. " + message
                     )
-        elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
-            message = "SI"
-        elif close_message and (re.search(r"\bNO\b", msg) or re.search(r"\bRECHAZO\b", msg)):
-            message = "NO"
+        # elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
+        # elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
+        #     message = "SI"
+        # elif close_message and any(re.search(rf"\b{re.escape(negacion)}\b", msg) for negacion in negaciones):
+        #     message = "NO"
         
         return message
     except Exception as e:
@@ -459,7 +463,7 @@ def openai_request(value):
             msg_type = "politica"            
             role = "user"        
         else:
-            if message == "NO":
+            if message == "terminar":
                 send_feedback = True
             elif message == "1" or message == "0":
                 send_comment = True
@@ -545,14 +549,42 @@ def openai_request(value):
             logging.info(f"assistant_response:{assistant_response}")
             if assistant_response == infoexterna:                
                 combined_content = f"{assistant_response} \n {closing}"
-                assistant_response = combined_content               
+                assistant_response = f"{combined_content} 🔒 Terminar sesión"    
+                role = "assistant"
+                response_type = "interactive"           
+                response_content = {
+                    "type": "button",
+                    "body": {
+                        "text": f"{combined_content}"
+                    },
+                    "action": {
+                        "buttons": [
+                            {"type": "reply", "reply": {"id": "terminar", "title": "🔒 Terminar Sesión"}}
+                        ]
+                    }
+                }     
         
         # Extraer fuentes usando patrón [DOCUMENTO]
         fuente = re.findall(r"\[(.*?)\]", assistant_response)
         fuente = drop_duplicates(fuente, na)  # eliminar duplicados
         
         if fuente != [na]:
-            assistant_response = f"{assistant_response}\n\n{closing}"
+            combined_content = f"{assistant_response}\n\n{closing}"
+            
+            assistant_response = f"{combined_content} 🔒 Terminar sesión"    
+            role = "assistant"
+            response_type = "interactive"           
+            response_content = {
+                    "type": "button",
+                    "body": {
+                        "text": f"{combined_content}"
+                    },
+                    "action": {
+                        "buttons": [
+                            {"type": "reply", "reply": {"id": "terminar", "title": "🔒 Terminar Sesión"}}
+                        ]
+                    }
+                }  
         else:
             categories = na        
         
@@ -607,7 +639,7 @@ def send_whatsapp_message(body, message, interactive=False):
     """Envía la respuesta a WhatsApp usando la API de Meta"""
     try:
         # whatsapp_token = azure_clients.get_secrets("whatsapp-token")
-        whatsapp_token = "EAATVIxJamLkBO71kS8j1LubZAgLALX9FJk8iYZBkN5IzTfk0bTz2ec1D6r3D6ZBGhBT8JH7KNpos4k0PEiyCUETaD9iLbYyQeLgdHZBZAeT4kqVKdZAnbxYRGdP5UubOyf6kENjCgOjSaAsMzCNX9dUOYJYicL2Je87vL2WslreMRVEFUkyynfv64RZAuW4zX6kywZDZD"
+        whatsapp_token = "EAATVIxJamLkBPFx54bbLzSpHKqrZCRjZB34Pgp2eisG8jvUhJUxa3lZA0amWn7V1bEOnhgZCqhucWzBNZALUUYYz7cJ954MRCqMgNOGSvA7lDiY4szazL8Sh6LtGcFsqM6kxEazUsAJcpGNnqAwZBLZBZCkZC8PvnNbQDhX81f7N4AcfU1vuEIvJ1JUKVpOIcMCj7DQZDZD"
         secret_whatsapp_token = whatsapp_token.strip()
         value = body["entry"][0]["changes"][0]["value"]
         phone_number_id = value["metadata"]["phone_number_id"]
