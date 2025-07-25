@@ -231,8 +231,8 @@ def send_whatsapp_message(contacts, template_name, texto, header_url=None, butto
                 texto,
                 header_url,
                 button_value
-            )
-
+            )            
+            
             logging.info(f"Enviando mensaje a: {contact}")
             response = requests.post(url, headers=headers, json=payload)
             logging.info(f"response content: {response.content}")
@@ -265,6 +265,71 @@ def send_whatsapp_message(contacts, template_name, texto, header_url=None, butto
             
             utils.add_message(conversation_history, "assistant", content, message_id, "campaña", na, na)
             
+            # -------------------------------
+            # 2. Enviar botones de aceptación/rechazo
+            # -------------------------------
+            response_content = {
+                "type": "button",
+                "body": {
+                    "text": "¿Aceptas la política de datos personales?"
+                },
+                "action": {
+                    "buttons": [
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": "accept",
+                                "title": "Aceptar"
+                            }
+                        },
+                        {
+                            "type": "reply",
+                            "reply": {
+                                "id": "reject",
+                                "title": "Rechazar"
+                            }
+                        }
+                    ]
+                }
+            }
+
+            payload_buttons = {
+                "messaging_product": "whatsapp",
+                "to": contact,
+                "type": "interactive",
+                "interactive": response_content
+            }
+
+            time.sleep(1)  # Pequeño delay entre mensajes
+
+            try:
+                logging.info(f"Enviando botones a: {contact}")
+                response_buttons = requests.post(url, headers=headers, json=payload_buttons)
+                logging.info(f"response buttons status: {response_buttons.status_code}")
+                logging.info(f"response buttons content: {response_buttons.content}")
+
+                if response_buttons.status_code != 200:
+                    errores.append({
+                        "contacto": contact,
+                        "status_code": response_buttons.status_code,
+                        "content": response_buttons.content.decode("utf-8", errors="ignore")
+                    })
+
+                else:
+                    buttons_response = response_buttons.json()
+                    message_id_btn = buttons_response.get("messages", [{}])[0].get("id", "sin_id")
+                    content_btn = "¿Aceptas la política de datos personales?"
+                    utils.add_message(conversation_history, "assistant", content_btn, message_id_btn, "politica", na, na)
+
+            except Exception as err:
+                logging.error(f"Error enviando botones: {err}")
+                errores.append({
+                    "contacto": contact,
+                    "error": f"Error enviando botones: {str(err)}"
+                })
+                continue
+
+            # Guardar conversación actualizada
             utils.save_conversation(container, {
                 "id": conversation["id"],
                 "userId": conversation["userId"],
@@ -274,7 +339,8 @@ def send_whatsapp_message(contacts, template_name, texto, header_url=None, butto
                 "messages": conversation_history,
                 "sessionStatus": conversation["sessionStatus"]
             })
-            time.sleep(1) 
+
+            time.sleep(1)  # Delay entre contactos para evitar throttling
             # response.raise_for_status()
     except Exception as e:
         logging.error(f'ERROR - sending whatsapp message: {e}')

@@ -33,9 +33,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             
             if not isinstance(texto, str) or not texto:
                 return func.HttpResponse("Texto inválido", status_code=400)
-
-            # if not isinstance(imagen_url, str) or not imagen_url:
-            #     return func.HttpResponse("Imagen inválida", status_code=400)
             
             if header_url is not None and not isinstance(header_url, str):
                 return func.HttpResponse("URL header inválida", status_code=400)
@@ -46,9 +43,6 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
             errores = functionComunicados.send_whatsapp_message(contactos, template_name, texto, header_url, url_button)
             errores_totales.extend(errores)
             
-            # functionComunicados.send_whatsapp_message(contactos, template_name, texto, header_url, url_button)
-
-        # return func.HttpResponse("Envío ejecutado correctamente", status_code=200)
         if errores_totales:
             logging.warning(f"Envío completado con errores: {errores_totales}")
             return func.HttpResponse(

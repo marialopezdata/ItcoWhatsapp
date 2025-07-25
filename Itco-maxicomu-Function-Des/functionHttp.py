@@ -1,15 +1,12 @@
 import os
 import re
-# import io
 import re
-# import uuid
 import pickle
 import logging
 import requests
 import faiss
 import tempfile
 from unidecode import unidecode
-# import pandas as pd
 from datetime import datetime, timedelta, timezone
 from langchain.vectorstores.faiss import FAISS
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
