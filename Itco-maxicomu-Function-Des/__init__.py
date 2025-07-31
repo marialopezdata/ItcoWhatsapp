@@ -16,14 +16,17 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.info(f"body: {json.dumps(body, indent=2)}")
 
         # Extraer valor principal del JSON
-        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})
-        
+        value = body.get("entry", [{}])[0].get("changes", [{}])[0].get("value", {})        
         statuses = value.get("statuses", [])
 
         # Procesar estados de mensajes
         for status in statuses:
             functionHttp.update_conversation_pricing_from_status(status)
             
+            # user_id = result["user_id"]
+            # conversation_id = result["conversation_id"]
+            # logging.info(f"conversation_id:{conversation_id}")
+            # functionHttp.schedule_inactivity_check(user_id, conversation_id, wait_minutes=1)
 
         # Si no hay mensajes, terminar
         messages = value.get("messages", [])

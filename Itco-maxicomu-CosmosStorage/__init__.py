@@ -4,6 +4,8 @@ import logging
 import azure.functions as func
 from datetime import datetime
 from . import functionCosmosStorage
+import utils.azure_clients as azure_clients
+import utils.session_cleanup as clean
 
 
 def main(timer: func.TimerRequest) -> None:
@@ -18,6 +20,8 @@ def main(timer: func.TimerRequest) -> None:
     endpoint = os.environ.get("cosmos_endpoint")
     
     try:
+        container = azure_clients.get_cosmos_container()
+        clean.clean_old_sessions(container)
         
         current_delta = functionCosmosStorage.read_delta_date(storage_account_url, blob_container_name)
         logging.info(f"Current delta date: {current_delta}")
@@ -25,11 +29,8 @@ def main(timer: func.TimerRequest) -> None:
         logging.info('The information transfer process begins')
         transfer_success  = functionCosmosStorage.cosmos_storage(endpoint, storage_account_url, database_name, container_name, blob_container_name, blob_folder_path, current_delta)
         if transfer_success:
-            new_delta = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0
-            ).strftime("%Y-%m-%dT%H:%M:%S")
-            
+            new_delta = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).strftime("%Y-%m-%dT%H:%M:%S")
             save_success = functionCosmosStorage.save_delta_date(storage_account_url, blob_container_name,new_delta)
-
             if not save_success:
                 logging.error("The delta date could not be updated.")
                 return

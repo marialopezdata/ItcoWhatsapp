@@ -4,34 +4,31 @@ import azure.functions as func
 from . import functionComunicados
 import utils.azure_clients as azure_clients
 
+
 def main(req: func.HttpRequest) -> func.HttpResponse:
     """Procesa las solicitudes de mensajes del webhook de Meta."""
     logging.info('Ejecutando función de envío proactivo de WhatsApp')
-
+    
     try:
-        
+        contactos = functionComunicados.get_active_phone_numbers()  
         body = req.get_json()
         
         logging.info(f"body: {json.dumps(body, indent=2)}")
         
-        communications = body.get("communication", [])
-        
-        contactos = functionComunicados.get_active_phone_numbers()
-        
+        communications = body.get("communication", [])              
         errores_totales = []
         
-        for item in communications:
-            
+        for item in communications:            
             logging.info(f"Enviando a: {contactos}")
             template_name = item.get("template", "")
             texto = item.get("texto", "")
             header_url = item.get("header")
             url_button = item.get("button")
-        
-            if not isinstance(template_name, str) or not template_name:
-                return func.HttpResponse("Imagen inválida", status_code=400)
             
-            if not isinstance(texto, str) or not texto:
+            if template_name is not None and not isinstance(template_name, str):
+                return func.HttpResponse("Template inválido", status_code=400)
+            
+            if texto is not None and not isinstance(texto, str):
                 return func.HttpResponse("Texto inválido", status_code=400)
             
             if header_url is not None and not isinstance(header_url, str):
@@ -57,8 +54,10 @@ def main(req: func.HttpRequest) -> func.HttpResponse:
         logging.error(f"Error en ejecución: {e}")
         return func.HttpResponse("Error al ejecutar envío", status_code=500)
 
+
 def handle_verification(req: func.HttpRequest) -> func.HttpResponse:
     """ Maneja la verificación del Webhook de WhatsApp Business API """
+    
     try:
         secret_verify_token = azure_clients.get_secrets("webhook-token") 
         

@@ -7,6 +7,7 @@ import requests
 import faiss
 import tempfile
 from unidecode import unidecode
+from typing import List
 from datetime import datetime, timedelta, timezone
 from langchain.vectorstores.faiss import FAISS
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
@@ -20,10 +21,17 @@ import utils.utils as utils
 # Variables de entorno
 # Definir tiempo máximo de conversación activa (24 horas)
 time_hours = int(os.environ.get("time_hours", 24))
-time_minutes = int(os.environ.get("time_minutes", 1))
+# time_minutes = int(os.environ.get("time_minutes", 1))
 secret_openai_api_key = azure_clients.get_secrets("openai-api-key")
 azure_endpoint = os.environ["AZURE_ENDPOINT"]
 api_version = os.environ["openai_api_version"]
+
+# whatsapp_token = azure_clients.get_secrets("whatsapp-token")
+whatsapp_token = "EAATVIxJamLkBPFx54bbLzSpHKqrZCRjZB34Pgp2eisG8jvUhJUxa3lZA0amWn7V1bEOnhgZCqhucWzBNZALUUYYz7cJ954MRCqMgNOGSvA7lDiY4szazL8Sh6LtGcFsqM6kxEazUsAJcpGNnqAwZBLZBZCkZC8PvnNbQDhX81f7N4AcfU1vuEIvJ1JUKVpOIcMCj7DQZDZD"
+secret_whatsapp_token = whatsapp_token.strip()
+
+MAX_WA_TEXT = 1024  # límite de WhatsApp
+TEXT_CHUNK_SIZE = 1000  # usamos un poco menos por seguridad
 
 
 def download_greeting():  
@@ -54,9 +62,10 @@ def download_greeting():
         infocorporativalabel = sections.get("InfoCorporativaLabel", "No se encontró etiqueta de información corporativa")
         infonocorporativalabel = sections.get("InfoNoCorporativaLabel", "No se encontró etiqueta de información no corporativa")
         infonocorporativa = sections.get("InfoNoCorporativa", "No se encontró Mensaje de información no corporativa")
-        infoexterna = sections.get("InfoExterna", "No se encontró Mensaje de información externa")        
+        infoexterna = sections.get("InfoExterna", "No se encontró Mensaje de información externa")
+        btnrechazo = sections.get("TextoBotonRechazo", "No se encontró Texto para el botón de rechazo")
         
-        return greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna
+        return greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna, btnrechazo
     
     except Exception as e:
         logging.error(f"ERROR - getting greetings: {e}")
@@ -156,6 +165,20 @@ def extract_categories(docs, na):
         raise
 
 
+# def extract_sources(response_text: str, na) -> List[str]:
+#     """Extract document sources from response text using [DOCUMENT] pattern."""
+#     try:
+#         sources = re.findall(r"\[(.*?)\]", response_text)
+#         return list(set(sources)) if sources else na
+#     except Exception as e:
+#         logging.error(f"Error extracting sources: {e}")
+#         return na
+
+def split_message(text, chunk_size=TEXT_CHUNK_SIZE):
+    """Divide texto largo en partes menores a 1024 caracteres."""
+    return [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+
+
 def drop_duplicates (lista: list, na):
     """Borra duplicados en las listas de Categorías y Fuentes."""
     try:
@@ -201,6 +224,7 @@ def update_conversation_pricing_from_status(status: dict):
 
         doc = items[0]
         user_id = doc.get("userId", "")
+        # conversation_id = doc.get("id", "")
         
         if not user_id:
             logging.warning(f"Documento sin userId, no se puede calcular precio")
@@ -235,10 +259,12 @@ def update_conversation_pricing_from_status(status: dict):
         total_cost = utils.calculate_total_cost(doc)
         doc["totalCostUSD"] = total_cost
         doc["updatedAt"] = now.isoformat()
+        
+        # schedule_inactivity_check(user_id, conversation_id, wait_minutes=1)
 
         # Guardar conversación actualizada
-        container.upsert_item(doc)
-
+        container.upsert_item(doc)       
+        
         logging.info(f"[OK] Guardado pricing para mensaje: {message_id} | ${cost_usd:.4f}")
 
     except Exception as e:
@@ -286,25 +312,21 @@ def extract_user_message(value):
         return "[Error al leer mensaje]"
 
 
-def preprocess_message(message, conversation_history, closing):
+# def preprocess_message(message, conversation_history, closing):
+def preprocess_message(message):
     """Estadariza ciertas expresiones que se pueden encontrar en el mensaje recibido."""
     try:
         msg = unidecode(message.strip().upper())
-        afirmaciones = ["SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"]
-        negaciones = ["NO", "NO GRACIAS", "NO, QUIERO", "NO, GRACIAS", "RECHAZO", "NO ESTOY DE ACUERDO", "NO QUIERO"]
+        # afirmaciones = ["SI", "SÍ", "ACEPTO", "CLARO", "DE ACUERDO"]
+        # negaciones = ["NO", "NO GRACIAS", "NO, QUIERO", "NO, GRACIAS", "RECHAZO", "NO ESTOY DE ACUERDO", "NO QUIERO"]
 
-        close_message = has_previous_closing_response(conversation_history, closing)        
+        # close_message = has_previous_closing_response(conversation_history, closing)        
         
         if "SERVIDUMBRE" in msg:
             message = (
                         "Estoy haciendo una consulta legal sobre una servidumbre eléctrica, servidumbre de transmisión de energía o servidumbre de transmisión de energía y telecomunicaciones. "
                         "Por favor, responde en ese contexto. " + message
                     )
-        # elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
-        # elif close_message and any(re.search(rf"\b{re.escape(afirmacion)}\b", msg) for afirmacion in afirmaciones):
-        #     message = "SI"
-        # elif close_message and any(re.search(rf"\b{re.escape(negacion)}\b", msg) for negacion in negaciones):
-        #     message = "NO"
         
         return message
     except Exception as e:
@@ -312,13 +334,23 @@ def preprocess_message(message, conversation_history, closing):
         raise
 
 
-def build_prompt_and_messages(history, message, na, prompt):
+def build_prompt_and_messages(history, message, na, prompt, infoexterna):
     """Construye el mensaje a partir del prompt."""
     try:
         vector_store = download_vectorialdb()
         docs = vector_store.similarity_search(message, k=3)
-        contexto = "\n".join([doc.page_content for doc in docs])    
-        system_message = SystemMessage(content=f"{prompt}\n\nContexto relevante:\n{contexto}")
+        
+        if not docs:
+                return {
+                    "response": infoexterna,
+                    "sources": ["No Aplica"],
+                    "categories": ["No Aplica"],
+                    "context_used": False
+                }
+        
+        # contexto = "\n".join([doc.page_content for doc in docs])    
+        context = "\n".join([f"Documento {i+1}: {doc.page_content}" for i, doc in enumerate(docs)])
+        system_message = SystemMessage(content=f"{prompt}\n\nContexto relevante:\n{context}")
         messages = [system_message]
         
         for msg in history:
@@ -329,6 +361,9 @@ def build_prompt_and_messages(history, message, na, prompt):
         
         messages.append(HumanMessage(content=message))
         
+        # response = llm.invoke(messages)
+        # response_text = response.content
+        
         categories = extract_categories(docs, na)
         
         return messages, categories
@@ -337,19 +372,19 @@ def build_prompt_and_messages(history, message, na, prompt):
         raise
 
 
-def has_previous_closing_response(history, closing):
-    """Devuelve True si ya existe un mensaje de cierre previo del asistente."""
-    try:
-        closing_normalized = closing.lower().strip()
-        for msg in history:
-            if msg["role"] == "assistant":
-                content = msg.get("content", "").lower().strip()
-                if closing_normalized in content:
-                    return True
-        return False
-    except Exception as e:
-        logging.error(f"ERROR - consulting previous closing: {e}")
-        raise
+# def has_previous_closing_response(history, closing):
+#     """Devuelve True si ya existe un mensaje de cierre previo del asistente."""
+#     try:
+#         closing_normalized = closing.lower().strip()
+#         for msg in history:
+#             if msg["role"] == "assistant":
+#                 content = msg.get("content", "").lower().strip()
+#                 if closing_normalized in content:
+#                     return True
+#         return False
+#     except Exception as e:
+#         logging.error(f"ERROR - consulting previous closing: {e}")
+#         raise
 
 
 def has_previous_feedback_response(history, feedback_comment):
@@ -362,31 +397,6 @@ def has_previous_feedback_response(history, feedback_comment):
     except Exception as e:
         logging.error(f"ERROR - consulting previous feedback: {e}")
         raise
-
-
-def check_user_inactivity(conversation, now=None, threshold_minutes=1):
-    """
-    Cierra la conversación si el último mensaje del usuario fue hace más de `threshold_minutes`.
-    Retorna True si la conversación fue cerrada.
-    """
-    now = now or datetime.now(timezone.utc)
-    messages = conversation.get("messages", [])
-    
-    # Buscar el último mensaje del usuario
-    last_user_message = next((m for m in reversed(messages) if m["role"] == "user"), None)
-    
-    if not last_user_message:
-        return False  # No hay mensaje del usuario aún
-    
-    last_user_time = datetime.fromisoformat(last_user_message.get("timestamp"))
-    
-    if now - last_user_time > timedelta(minutes=threshold_minutes):
-        logging.info(f"Sesión {conversation['id']} cerrada por inactividad de más de {threshold_minutes} minutos.")
-        conversation["sessionStatus"] = "closed"
-        conversation["updatedAt"] = now.isoformat()
-        return True
-    
-    return False
 
 
 def openai_request(value):
@@ -442,12 +452,13 @@ def openai_request(value):
             send_greeting = True
             
         model = build_openai_model()  
-        greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna = download_greeting()        
+        greeting, closing, feedback, feedback_comment, thanks, session_end, infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna, btnrechazo = download_greeting()        
         prompt = built_prompt (infocorporativalabel, infonocorporativalabel, infonocorporativa, infoexterna)
         
         # Mensajes del usuario
         logging.info(f"message:{message}")
-        message = preprocess_message(message, conversation_history, closing)
+        # message = preprocess_message(message, conversation_history, closing)
+        message = preprocess_message(message)
         
         feedback_message = has_previous_feedback_response(conversation_history, feedback_comment)
         
@@ -538,15 +549,15 @@ def openai_request(value):
             assistant_response = system_message.content
         else:
             logging.info("Está enviando respuesta temática")
-            messages, categories = build_prompt_and_messages(conversation_history, message, na, prompt)
+            messages, categories = build_prompt_and_messages(conversation_history, message, na, prompt, infoexterna)
             msg_type = "normal"
             role = "assistant"
             response = model.invoke(messages)
             assistant_response = response.content
-            logging.info(f"assistant_response:{assistant_response}")
+            # sources = extract_sources(assistant_response, na)
             if assistant_response == infoexterna:                
                 combined_content = f"{assistant_response} \n {closing}"
-                assistant_response = f"{combined_content} 🔒 Terminar sesión"    
+                assistant_response = f"{combined_content} \n {btnrechazo}"    
                 role = "assistant"
                 response_type = "interactive"           
                 response_content = {
@@ -556,7 +567,7 @@ def openai_request(value):
                     },
                     "action": {
                         "buttons": [
-                            {"type": "reply", "reply": {"id": "terminar", "title": "🔒 Terminar Sesión"}}
+                            {"type": "reply", "reply": {"id": "terminar", "title": btnrechazo}}
                         ]
                     }
                 }     
@@ -566,9 +577,9 @@ def openai_request(value):
         fuente = drop_duplicates(fuente, na)  # eliminar duplicados
         
         if fuente != [na]:
-            combined_content = f"{assistant_response}\n\n{closing}"
+            combined_content = f"{assistant_response} \n {closing}"
             
-            assistant_response = f"{combined_content} 🔒 Terminar sesión"    
+            assistant_response = f"{combined_content} \n {btnrechazo}"    
             role = "assistant"
             response_type = "interactive"           
             response_content = {
@@ -578,7 +589,7 @@ def openai_request(value):
                     },
                     "action": {
                         "buttons": [
-                            {"type": "reply", "reply": {"id": "terminar", "title": "🔒 Terminar Sesión"}}
+                            {"type": "reply", "reply": {"id": "terminar", "title": btnrechazo}}
                         ]
                     }
                 }  
@@ -632,12 +643,11 @@ def openai_request(value):
         raise
 
 
+
+
 def send_whatsapp_message(body, message, interactive=False):
     """Envía la respuesta a WhatsApp usando la API de Meta"""
-    try:
-        # whatsapp_token = azure_clients.get_secrets("whatsapp-token")
-        whatsapp_token = "EAATVIxJamLkBPFx54bbLzSpHKqrZCRjZB34Pgp2eisG8jvUhJUxa3lZA0amWn7V1bEOnhgZCqhucWzBNZALUUYYz7cJ954MRCqMgNOGSvA7lDiY4szazL8Sh6LtGcFsqM6kxEazUsAJcpGNnqAwZBLZBZCkZC8PvnNbQDhX81f7N4AcfU1vuEIvJ1JUKVpOIcMCj7DQZDZD"
-        secret_whatsapp_token = whatsapp_token.strip()
+    try:        
         value = body["entry"][0]["changes"][0]["value"]
         phone_number_id = value["metadata"]["phone_number_id"]
         from_number = value["messages"][0]["from"]
@@ -645,6 +655,9 @@ def send_whatsapp_message(body, message, interactive=False):
             "Authorization": f"Bearer {secret_whatsapp_token}",
             "Content-Type": "application/json",
         }
+        
+        logging.info(f"message:{message}")
+        logging.info(f"longitud message:{len(message)}")
         
         url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
         

@@ -49,6 +49,10 @@ def cosmos_storage(endpoint, storage_account_url, database_name, container_name,
             query=query,
             enable_cross_partition_query=True
         ))
+        # Validación para documentos vacíos
+        if not documents or len(documents) == 0:
+            logging.info("No new documents were found to transfer. A JSON file will not be created.")
+            return True
 
         # Convertir a JSON
         json_data = json.dumps(documents, ensure_ascii=False)
